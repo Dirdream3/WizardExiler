@@ -1,0 +1,13 @@
+# 统一换行符，免得 Windows / macOS / Linux 之间来回改行尾、把整个文件标成"全改了"
+* text=auto eol=lf
+
+# 二进制，别做行尾转换也别在 diff 里展开
+*.png binary
+*.jpg binary
+*.ogg binary
+*.wav binary
+*.ttf binary
+
+# .tscn / .tres 是文本，能看 diff，但合并冲突很难手改 —— 尽量别两个人同时改同一个场景
+*.tscn text
+*.tres text

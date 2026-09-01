@@ -1,0 +1,18 @@
+# Godot 4 生成的缓存，不要提交
+.godot/
+/android/
+
+# 导出配置里可能有签名密钥
+export_presets.cfg
+*.tmp
+
+# ★ 玩家存档在 user:// 里（%APPDATA%\Godot\app_userdata\...），本来就不在仓库里 ★
+#   这两条是防止有人手动把它复制进来
+backpack.json
+*.save
+
+# 编辑器 / 系统杂项
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
