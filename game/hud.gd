@@ -12,6 +12,11 @@ extends CanvasLayer
 
 var player: Player
 
+## 局内流程的界面（地图 / 奖励 / 商店）。World 在局模式下拿它接信号。
+var run_ui: RunUI
+## 调试控制台（` / F1 开关，往背包里生成物品）
+var console: ConsoleUI
+
 var _center_msg: Label
 var _debug_panel: PanelContainer
 var _debug_text: RichTextLabel
@@ -28,6 +33,7 @@ func _ready() -> void:
 func bind_player(p: Player) -> void:
 	player = p
 	_panel.bind(p)
+	console.player = p
 
 
 ## 左侧常驻面板（冒烟测试要拿它做点击模拟）
@@ -61,7 +67,7 @@ func show_message(text: String) -> void:
 
 func _report_text() -> String:
 	if player.skill == null:
-		return "[color=#e07070]当前技能栏这一格没有插技能石。在左边的背包里插一颗。[/color]"
+		return "[color=#e07070]没有能用的技能。在左边的背包里把技能宝石镶进一根法杖。[/color]"
 	var target := UIHelper.nearest_enemy(get_tree(), player)
 	return DamageReport.build(
 		player.stats,
@@ -116,7 +122,15 @@ func _build_ui() -> void:
 	_debug_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	scroll.add_child(_debug_text)
 
+	# --- 局内流程界面（只盖右边战斗画面，和左侧面板不重叠）---
+	run_ui = RunUI.new()
+	root.add_child(run_ui)
+
 	# --- 左侧常驻面板 ---
 	# ★ 放在最后 add_child ★ 它要吃鼠标点击，必须画在最上层
 	_panel = InventoryUI.new()
 	root.add_child(_panel)
+
+	# --- 调试控制台（盖在战斗画面上，和左侧面板不重叠，所以顺序无所谓）---
+	console = ConsoleUI.new()
+	root.add_child(console)

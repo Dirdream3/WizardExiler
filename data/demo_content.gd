@@ -57,6 +57,19 @@ static func buff_shock() -> BuffDef:
 		.with_mod(M.new(S.DAMAGE_TAKEN, M.Kind.INCREASED, 0.08, T.NONE))
 
 
+static func buff_chill() -> BuffDef:
+	# 冰缓：PoE 冰霜伤害的标志性异常状态 —— 减慢目标的行动。
+	# ★ 挂在「移动速度」上，而不是攻击速度 ★
+	#   普通怪从没设过 ATTACK_SPEED 基础值（是 0），在 0 上"降低 30%"还是 0，
+	#   等于一条恒真数据；而追击速度走属性系统后，减移速是真的能让怪追不上你。
+	# REFRESH：重复命中只续时间不叠层（PoE 的冰缓也不叠层，只取最强）。
+	return BuffDef.new(&"chill", "冰缓") \
+		.as_debuff() \
+		.with_duration(2.5) \
+		.with_stacking(BuffDef.StackRule.REFRESH) \
+		.with_mod(M.new(S.MOVE_SPEED, M.Kind.INCREASED, -0.30))
+
+
 static func buff_ignite() -> BuffDef:
 	# 独立计时的 DoT：每个来源各上一份，全部同时结算
 	return BuffDef.new(&"ignite", "点燃") \
@@ -103,7 +116,10 @@ static func make_player() -> CombatEntity:
 	# 开局身上带的那套装备。
 	# ★ 这里装一遍是为了让"不带背包的纯数值场景"（单元测试、离线 DPS 计算器）
 	#   也能拿到一个装备齐全的角色 ★
-	#   游戏里 Player 每次背包变动都会把 equip_mods 整层按背包重建，结果是一样的。
+	# ★ 注意口径（ADR-023）★：游戏里法杖的词缀走 skill_mods、只对槽里的技能生效；
+	#   这个基准角色把橡木法杖的词缀也放进 equip_mods，等价于"正在用橡木法杖里的
+	#   技能"的总加成 —— 老的伤害断言全部原样成立；只是拿它算"别根法杖里的
+	#   技能"时会比游戏内偏高，写新断言时留意。
 	for e in EquipLibrary.default_loadout():
 		p.equip_mods.add_all((e as EquipItem).build_mods())
 

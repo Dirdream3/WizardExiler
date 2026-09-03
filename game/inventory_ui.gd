@@ -12,10 +12,11 @@ extends Control
 ##   画格子的事交给 GemGridView，这里只管把它们串起来。
 ##
 ## 交互（和背包乱斗一样）：
-##   · 左键点一颗宝石 → 拿起来（连它的朝向一起）
+##   · 左键点一颗宝石 → 拿起来（连它的朝向一起；拿法杖时槽里的宝石跟着走）
 ##   · 手上有东西时左键点格子 → 放下；放不下会写明原因
+##   · ★ 手上是技能宝石、点一根法杖 → 镶进槽位 ★（同款=合成，占着=交换）
 ##   · ★ 右键 → 把手上的宝石转 90° ★（箭头跟着转，预览里能直接看到指哪）
-##   · 鼠标停在宝石上 → 下面显示它的完整属性；`[-] [+]` 升降级
+##   · 鼠标停在宝石上 → 下面显示它的完整属性；`[-] [+]` 升降级；「取出」拆宝石
 
 const S = preload("res://combat/combat_stat.gd")
 
@@ -28,6 +29,9 @@ var player: Player
 ## 拿在手上的宝石 + 它的朝向
 var _held = null
 var _held_rot := 0
+## 丢弃的两段确认：第一次点「丢弃」把手上的东西记在这里，第二次点才真的销毁。
+## 任何点击（放下/拿起/右键）都会清掉它 —— 改了主意就要重新确认，不能"一点就没"。
+var _discard_arm = null
 ## 详情面板当前显示的宝石
 var _detail = null
 ## 上一次操作的提示（放不下的原因等）
@@ -36,6 +40,7 @@ var _notice := ""
 var _life_fill: ColorRect
 var _mana_fill: ColorRect
 var _vital_label: Label
+var _gold_label: Label
 var _combat_label: Label
 var _buff_label: Label
 var _skill_label: Label
@@ -80,6 +85,13 @@ func _process(delta: float) -> void:
 	_vital_label.text = "生命 %d/%d    魔力 %d/%d" % [
 		roundi(st.life), roundi(st.max_life()), roundi(st.mana), roundi(st.max_mana())]
 
+	# ★ 金币常驻显示（只在局模式下有意义，沙盒没有金币概念）★
+	if RunSession.enabled and RunSession.state != null:
+		_gold_label.visible = true
+		_gold_label.text = "✦ 金币 %d" % RunSession.state.gold
+	else:
+		_gold_label.visible = false
+
 	# DPS 要跑一遍完整的伤害管线，没必要每帧算
 	_dps_cd -= delta
 	if _dps_cd <= 0.0:
@@ -88,6 +100,10 @@ func _process(delta: float) -> void:
 		_dps = 0.0
 		if target != null and target.stats != null and player.skill != null:
 			_dps = DamagePipeline.dps(st, target.stats, player.skill)
+		# ★ 详情停在触媒上时，进度文本要活着 ★ —— 否则战斗中盯着面板看，
+		# 进度纹丝不动，像是"施加异常没被计数"（其实一直在走）
+		if _detail is CatalystGem:
+			_detail_text.text = _detail_bbcode()
 
 	_combat_label.text = "单发 DPS %d    场上敌人 %d" % [
 		roundi(_dps), get_tree().get_node_count_in_group(&"enemy")]
@@ -105,7 +121,7 @@ func _buff_text(st: CombatEntity) -> String:
 ## 当前技能这一发的实际参数（含装备词缀 + 箭头连上的辅助）
 func _skill_text() -> String:
 	if player.skill == null:
-		return "[Q] 背包里没有主动技能石"
+		return "[Q] 没有能用的技能 —— 把技能宝石镶进一根法杖"
 	var ps := player.projectile_spec()
 	var head := "[Q] %s  消耗%d" % [player.skill.display_name, roundi(player.skill.mana_cost)]
 	if ps == null:
@@ -116,6 +132,7 @@ func _skill_text() -> String:
 # ------------------------------------------------------------------ 交互
 
 func _on_cell_pressed(cell: Vector2i) -> void:
+	_discard_arm = null   # 点了格子 = 改主意了，丢弃要重新走两段确认
 	if _held == null:
 		# 空手 → 把这一格上的东西整件拿起来
 		var p := player.pick_up_at(cell)
@@ -129,14 +146,44 @@ func _on_cell_pressed(cell: Vector2i) -> void:
 
 	# 手上有东西 → 放到预览的位置去
 	var origin := _grid_view.ghost_origin()
+
+	# ★ 手上是技能宝石、点在法杖上 = 镶嵌 ★ 优先于普通放置
+	var wand := player.grid.socket_target(_held, origin)
+	if wand != null:
+		var socket_why := player.grid.socket_reject_reason(_held, origin)
+		if socket_why != "":
+			_notice = "✕ " + socket_why
+			refresh.call_deferred()
+			return
+		var wand_gem := wand.gem as EquipItem
+		var had := wand_gem.socketed
+		var out = player.socket_gem(_held, wand)
+		_held = out          # 交换时旧宝石回到手上；镶入/合成时手空了
+		_held_rot = 0
+		_detail = wand_gem
+		if out != null:
+			_notice = "✦ 换下「%s」，拿在手上了" % out.display_name
+		elif had != null:
+			_notice = "✦ 合成！槽里的「%s」升到 %d 级" % [had.display_name, had.level]
+		else:
+			_notice = "✦ 已镶入「%s」" % wand_gem.display_name
+		refresh.call_deferred()
+		return
+
+	# 先看是不是叠在同款上（合成）——成功后要报"升到几级"，得提前记住目标
+	var target := player.grid.merge_target(_held, origin)
 	var why := player.place_gem(_held, origin, _held_rot)
 	if why == "":
 		_held = null
 		_held_rot = 0
-		_notice = ""
+		if target != null:
+			_notice = "✦ 合成！「%s」升到 %d 级" % [target.gem.display_name, target.gem.level]
+			_detail = target.gem
+		else:
+			_notice = ""
 		player.rebuild()
 	else:
-		_notice = why
+		_notice = "✕ " + why
 		refresh.call_deferred()
 
 
@@ -150,10 +197,20 @@ func _exit_tree() -> void:
 		GemSave.save(player)
 
 
-## 右键：把手上的宝石转 90°
+## 右键：手上有宝石 → 转 90°；★ 空手右键点法杖 → 取出槽里的宝石 ★
+## 为什么用右键取出：靠"悬停详情 + 按钮"取宝石不可靠 ——
+## 鼠标挪去按钮的路上会扫过别的宝石，详情就被顶掉了。右键直接点在法杖上，没有中间状态。
 func _on_rotate_pressed() -> void:
+	_discard_arm = null
 	if _held == null:
-		_notice = "先点一颗宝石拿起来，再右键转方向"
+		var p := player.grid.at(_grid_view.hover_cell())
+		if p != null and p.is_wand() and p.skill_gem() != null:
+			_held = player.unsocket_gem(p.gem as EquipItem)
+			_held_rot = 0
+			_detail = _held
+			_notice = "✦ 取出了「%s」，拿在手上" % _held.display_name
+		else:
+			_notice = "手上有宝石时右键 = 转方向；空手右键点法杖 = 取出槽里的宝石"
 	else:
 		_held_rot = (_held_rot + 1) % 4
 		_notice = ""
@@ -169,8 +226,55 @@ func _on_gem_hovered(gem) -> void:
 func _change_detail_level(delta: int) -> void:
 	if _detail == null:
 		return
-	_detail.level = _detail.clamp_level(_detail.level + delta)
+	# 详情停在法杖上时，[-]/[+] 操作的是槽里的技能宝石（法杖本身没有等级）
+	var target = _detail
+	if _detail is EquipItem and (_detail as EquipItem).socketed != null:
+		target = (_detail as EquipItem).socketed
+	target.level = target.clamp_level(target.level + delta)
 	player.rebuild()
+
+
+## 「取出宝石」按钮：把详情面板当前这根法杖槽里的宝石拆出来、放到手上。
+func _unsocket_detail() -> void:
+	if not (_detail is EquipItem) or (_detail as EquipItem).socketed == null:
+		# 鼠标挪过来的路上详情常被别的宝石顶掉 → 直接教更稳的手势
+		_notice = "✕ 详情不是镶着宝石的法杖 —— 直接空手右键点法杖就能取出"
+		refresh.call_deferred()
+		return
+	if _held != null:
+		_notice = "✕ 手上有东西，先放下再取"
+		refresh.call_deferred()
+		return
+	_held = player.unsocket_gem(_detail as EquipItem)
+	_held_rot = 0
+	_notice = "✦ 取出了「%s」，拿在手上" % _held.display_name
+	refresh.call_deferred()
+
+
+## 「丢弃」按钮：把手上的东西**销毁**。
+## ★ 两段确认 ★ 销毁不可逆（背包空间就是靠丢东西腾的，但误触不能原谅）：
+##   第一次点只发警告并记住"要丢的是哪一件"，第二次点同一件才真的丢。
+func _discard_held() -> void:
+	if _held == null:
+		_notice = "✕ 先把要丢的东西拿在手上（左键点它），再点「丢弃」"
+		refresh.call_deferred()
+		return
+	if _discard_arm != _held:
+		_discard_arm = _held
+		var extra := ""
+		if _held is EquipItem and (_held as EquipItem).socketed != null:
+			extra = "，槽里的「%s」会一起丢掉" % (_held as EquipItem).socketed.display_name
+		_notice = "⚠ 再点一次「丢弃」就扔掉「%s」%s（不可恢复）" % [_gem_name(_held), extra]
+		refresh.call_deferred()
+		return
+	# 手上的东西本来就不在网格里，放掉引用它就没了；rebuild 顺手把"没有它"的背包存盘
+	var gone := _gem_name(_held)
+	_held = null
+	_held_rot = 0
+	_discard_arm = null
+	_notice = "✦ 已丢弃「%s」" % gone
+	player.rebuild()
+	refresh.call_deferred()
 
 
 # ------------------------------------------------------------------ 构建界面
@@ -201,6 +305,10 @@ func _build() -> void:
 
 	_vital_label = UIHelper.label("", 9, Color(0.90, 0.90, 0.95), false)
 	box.add_child(_vital_label)
+	# 金币行：局模式常驻显示，沙盒模式隐藏（_process 里控制）
+	_gold_label = UIHelper.label("", 10, Color(0.95, 0.84, 0.45), false)
+	_gold_label.visible = false
+	box.add_child(_gold_label)
 	_combat_label = UIHelper.label("", 9, Color(0.98, 0.80, 0.42), false)
 	box.add_child(_combat_label)
 	_buff_label = UIHelper.label("", 9, Color(0.62, 0.86, 0.48), false)
@@ -212,7 +320,7 @@ func _build() -> void:
 	box.add_child(_skill_label)
 
 	# ---------------- 背包网格 ----------------
-	box.add_child(_title("背包   左键拿起/放下   右键转方向"))
+	box.add_child(_title("背包  左键拿/放  右键转向  宝石点法杖=镶嵌  空手右键法杖=取出"))
 
 	_grid_view = GemGridView.new()
 	_grid_view.cell_pressed.connect(_on_cell_pressed)
@@ -232,6 +340,14 @@ func _build() -> void:
 	level_row.add_child(_small_button("-", func() -> void: _change_detail_level(-1)))
 	level_row.add_child(_small_button("+", func() -> void: _change_detail_level(1)))
 	level_row.add_child(UIHelper.label(" 升降级 ", 8, Color(0.55, 0.55, 0.65), false))
+	# 镶进法杖的宝石不占格子、点不到 → 必须有一个专门的"拆下来"入口
+	var unsocket := _small_button("取出宝石", func() -> void: _unsocket_detail())
+	unsocket.custom_minimum_size = Vector2(56, 14)
+	level_row.add_child(unsocket)
+	# 丢弃手上的东西（两段确认）。背包空间有限，打到不要的装备/宝石靠它腾地方
+	var discard := _small_button("丢弃", func() -> void: _discard_held())
+	discard.custom_minimum_size = Vector2(40, 14)
+	level_row.add_child(discard)
 	# ★ 有了存档就必须有这个按钮 ★ 摆乱了之后光靠重开是回不去的
 	var reset := _small_button("重置背包", func() -> void:
 		_held = null
@@ -257,7 +373,7 @@ func _build() -> void:
 
 	# ---------------- 底部操作提示 ----------------
 	var hint := UIHelper.label(
-		"WASD 移动   左键/空格 施法   Q 切技能   Tab 伤害详情   R 重开",
+		"WASD 移动   左键/空格 施法   Q 切技能   Tab 伤害详情   R 重开一整局",
 		8, Color(0.55, 0.55, 0.65), false)
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.custom_minimum_size = Vector2(PANEL_W - 14.0, 0)
@@ -273,11 +389,15 @@ func refresh() -> void:
 	_grid_view.refresh()
 
 	if _held != null:
-		_held_label.text = "手上：%s（点格子放下 / 右键转方向）" % _gem_name(_held)
+		if _held is SkillGem:
+			_held_label.text = "手上：%s（点法杖=镶入 / 点格子放下 / 叠同款=合成）" % _gem_name(_held)
+		else:
+			_held_label.text = "手上：%s（点格子放下 / 右键转方向 / 叠同款=合成）" % _gem_name(_held)
 	elif _notice != "":
-		_held_label.text = "✕ " + _notice
+		# ✕ / ✦ 前缀由设置提示的那一方自己带（拒绝原因带 ✕，合成成功带 ✦）
+		_held_label.text = _notice
 	else:
-		_held_label.text = "绿箭头 = 连上了   红箭头 = 标签不匹配   灰箭头 = 没指着技能"
+		_held_label.text = "技能宝石要镶进法杖才能施放；箭头指着法杖的辅助才生效"
 
 	_detail_text.text = _detail_bbcode()
 
@@ -322,6 +442,9 @@ func _title(text: String) -> Label:
 # ------------------------------------------------------------------ 显示文本
 
 func _gem_name(gem) -> String:
+	# 辅助宝石和装备没有等级（max_level = 1），别显示一个永远是 Lv1 的假等级
+	if int(gem.max_level) <= 1:
+		return String(gem.display_name)
 	return "%s Lv%d" % [gem.display_name, gem.level]
 
 
@@ -329,17 +452,33 @@ func _detail_bbcode() -> String:
 	if _detail == null:
 		return "[color=#7a7a8c]把鼠标停在一颗宝石上看它的属性。[/color]"
 
+	# 面板顶上放一张大图标（有图才放；BBCode 的 [img] 直接吃资源路径）
+	var head := ""
+	var ipath := UIHelper.icon_path(_detail)
+	if ipath != "":
+		head = "[img=34]%s[/img]\n" % ipath
+
 	if _detail is EquipItem:
-		return (_detail as EquipItem).tooltip()
+		var eq := _detail as EquipItem
+		var etext := head + eq.tooltip()
+		# 法杖：把槽里技能宝石的完整面板也接在下面（宝石不占格子、悬停不到）
+		if eq.socketed != null:
+			var wand_placed := _find_placed(eq)
+			var sups: Array = []
+			if wand_placed != null:
+				for s in player.grid.supports_for(wand_placed):
+					sups.append((s as GemGrid.Placed).gem)
+			etext += "\n[color=#7a7a8c]──── 槽里的宝石 ────[/color]\n"
+			etext += eq.socketed.tooltip(sups)
+			etext += "\n[color=#9a9aac]空手右键点这根法杖，就能把它取出来[/color]"
+		return etext
 
-	var item := player.active_item()
 	if _detail is SkillGem:
-		var socketed: Array = []
-		if item != null and item.gem == _detail:
-			socketed = player.active_link().supports
-		return (_detail as SkillGem).tooltip(socketed)
+		# 裸放的技能宝石：没有载体，吃不到任何辅助 —— 提醒玩家镶进法杖
+		return head + (_detail as SkillGem).tooltip() \
+				+ "\n[color=#9a9aac]拿起来点到一根法杖上镶入，才能施放[/color]"
 
-	var out := (_detail as SupportGem).tooltip()
+	var out := head + (_detail as SupportGem).tooltip()
 	# 这颗辅助现在连到哪了？直接告诉玩家，省得对着箭头猜
 	var placed := _find_placed(_detail)
 	if placed != null:
@@ -347,12 +486,14 @@ func _detail_bbcode() -> String:
 		var target := player.grid.at(placed.arrow_target())
 		match state:
 			"linked":
-				out += "\n[color=#6be06b]★ 箭头连到「%s」上了 ★[/color]" % target.gem.display_name
+				out += "\n[color=#6be06b]★ 箭头连到「%s」，辅助着槽里的「%s」★[/color]" % [
+					target.gem.display_name, target.skill_gem().display_name]
 			"blocked":
-				out += "\n[color=#e07070]箭头指着「%s」，但它没有【%s】标签，连不上[/color]" % [
-					target.gem.display_name, CombatTags.describe(_detail.required_tags)]
+				out += "\n[color=#e07070]箭头指着「%s」，但槽里的「%s」没有【%s】标签，连不上[/color]" % [
+					target.gem.display_name, target.skill_gem().display_name,
+					CombatTags.describe(_detail.required_tags)]
 			_:
-				out += "\n[color=#9a9aac]箭头没指着任何技能石 —— 把它挪到技能石旁边，箭头对准它[/color]"
+				out += "\n[color=#9a9aac]箭头没指着法杖 —— 把它挪到法杖旁边，箭头对准法杖[/color]"
 	return out
 
 

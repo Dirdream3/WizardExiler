@@ -35,6 +35,20 @@ func refresh() -> void:
 	queue_redraw()
 
 
+var _live_cd := 0.0
+
+## ★ 触媒的进度在战斗中实时变化 ★ 有触媒连着时定期重画，进度条才是活的。
+## （没有触媒时一分钱都不花 —— 网格平时只在背包变动时重画）
+func _process(delta: float) -> void:
+	if player == null:
+		return
+	_live_cd -= delta
+	if _live_cd <= 0.0:
+		_live_cd = 0.15
+		if player.has_catalysts():
+			queue_redraw()
+
+
 ## 手上拿着的东西放到当前悬停位置的话，左上角应该落在哪一格。
 ##
 ## ★ 用"外接矩形的中心对准鼠标"而不是"左上角对准鼠标" ★
@@ -80,6 +94,12 @@ func _cell_at(pos: Vector2) -> Vector2i:
 	return Vector2i(floori(pos.x / CELL), floori(pos.y / CELL))
 
 
+## 鼠标现在悬停在哪一格（(-1,-1) = 不在网格上）。
+## InventoryUI 的"空手右键点法杖取出宝石"要知道右键点在了哪。
+func hover_cell() -> Vector2i:
+	return _hover
+
+
 # ------------------------------------------------------------------ 画
 
 func _draw() -> void:
@@ -117,22 +137,75 @@ func _draw_item(p: GemGrid.Placed, is_active: bool) -> void:
 		for cell in p.cells():
 			draw_rect(_cell_rect(cell), Color(1.0, 0.93, 0.55), false, 1.0)
 
-	# 名字写在左上角那一格里
 	var font := get_theme_default_font()
-	var fs := 11 if p.is_skill() else 9
-	var text := UIHelper.gem_short(p.gem)
-	var w := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 	var box := _cell_rect(p.cells()[0])
-	draw_string(font, box.position + Vector2((box.size.x - w) * 0.5, box.size.y * 0.72),
-			text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0.06, 0.06, 0.09))
 
-	# 等级缩在右下角。★ 宝石只占 1 格了，和名字挤在同一格里 ★
-	# 所以名字往上提一点、等级右下角小字，别糊成一团。
-	if p.is_skill():
-		var lv := "%d" % p.gem.level
+	var icon := UIHelper.gem_icon(p.gem)
+	if icon != null:
+		# ★ 图标按整件东西的外接矩形等比缩放、居中 ★
+		#   装备是长条（1×3 法杖）时图标只占中间一块，四周露出的底色
+		#   还保留着"金褐 = 装备 / 绿 = 辅助"的颜色语言，不用图标扛全部信息。
+		var bound := box
+		for cell in p.cells():
+			bound = bound.merge(_cell_rect(cell))
+		var ts := Vector2(icon.get_size())
+		var k := minf(bound.size.x / ts.x, bound.size.y / ts.y)
+		var dsize := ts * k
+		draw_texture_rect(icon, Rect2(bound.get_center() - dsize * 0.5, dsize), false)
+	else:
+		# 没有图标的内容退回文字短名，写在左上角那一格里
+		var fs := 11 if p.is_skill() else 9
+		var text := UIHelper.gem_short(p.gem)
+		var w := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+		draw_string(font, box.position + Vector2((box.size.x - w) * 0.5, box.size.y * 0.72),
+				text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0.06, 0.06, 0.09))
+
+	# ★ 法杖的镶嵌槽 ★ 画在中间那一格：空槽 = 暗色圆环；
+	# 镶了宝石 = 宝石色圆底 + 小图标 —— 一眼看出"这根法杖现在放的是什么技能"。
+	if p.is_wand():
+		var cells := p.cells()
+		var slot_rect := _cell_rect(cells[cells.size() / 2])
+		var centre := slot_rect.get_center()
+		var sg = (p.gem as EquipItem).socketed
+		if sg == null:
+			draw_circle(centre, CELL * 0.30, Color(0.08, 0.08, 0.12, 0.9))
+			draw_arc(centre, CELL * 0.30, 0.0, TAU, 20, Color(0.55, 0.50, 0.38), 1.5)
+		else:
+			draw_circle(centre, CELL * 0.34, Color(0.06, 0.06, 0.09, 0.92))
+			draw_circle(centre, CELL * 0.31, UIHelper.gem_color(sg))
+			var sicon := UIHelper.gem_icon(sg)
+			if sicon != null:
+				var ssize := Vector2(CELL, CELL) * 0.52
+				draw_texture_rect(sicon, Rect2(centre - ssize * 0.5, ssize), false)
+			else:
+				var stext := UIHelper.gem_short(sg)
+				var sw := font.get_string_size(stext, HORIZONTAL_ALIGNMENT_LEFT, -1, 9).x
+				draw_string(font, centre + Vector2(-sw * 0.5, 3.0), stext,
+						HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.06, 0.06, 0.09))
+
+	# 等级缩在右下角。★ 现在数字压在图标上 ★ 垫一小块亮色底，任何图标上都读得清
+	# 法杖显示的是槽里那颗宝石的等级（法杖本身没有等级）。
+	var lv_gem = p.skill_gem() if p.is_wand() else (p.gem if p.is_skill() else null)
+	if lv_gem != null:
+		var lv := "%d" % lv_gem.level
 		var lw := font.get_string_size(lv, HORIZONTAL_ALIGNMENT_LEFT, -1, 7).x
-		draw_string(font, box.position + Vector2(box.size.x - lw - 1.0, box.size.y - 1.0),
-				lv, HORIZONTAL_ALIGNMENT_LEFT, -1, 7, Color(0.10, 0.10, 0.14, 0.9))
+		var pos := box.position + Vector2(box.size.x - lw - 1.0, box.size.y - 1.0)
+		draw_rect(Rect2(pos + Vector2(-1.0, -6.0), Vector2(lw + 2.0, 7.0)),
+				Color(0.92, 0.90, 0.80, 0.85), true)
+		draw_string(font, pos, lv, HORIZONTAL_ALIGNMENT_LEFT, -1, 7, Color(0.10, 0.10, 0.14))
+
+	# ★ 触媒：格子底部画一条进度 ★ —— 攒到哪一眼看得见。
+	# 没有这条时玩家看不到计数在走，会误以为"施加异常没算数"。
+	if p.gem is CatalystGem:
+		var cg := p.gem as CatalystGem
+		var frac := clampf(cg.progress / maxf(0.001, cg.threshold), 0.0, 1.0)
+		var bar := _cell_rect(p.cells()[0])
+		draw_rect(Rect2(bar.position + Vector2(1.0, bar.size.y - 3.5),
+				Vector2(bar.size.x - 2.0, 2.5)), Color(0.10, 0.08, 0.14, 0.8), true)
+		if frac > 0.0:
+			draw_rect(Rect2(bar.position + Vector2(1.0, bar.size.y - 3.5),
+					Vector2((bar.size.x - 2.0) * frac, 2.5)),
+					Color(0.95, 0.78, 1.0, 0.95), true)
 
 	# 箭头
 	if p.is_support():
@@ -173,6 +246,20 @@ func _draw_arrow_at(cell: Vector2i, facing: Vector2i, col: Color) -> void:
 
 func _draw_ghost() -> void:
 	var origin := ghost_origin()
+
+	# ★ 手上是技能宝石、悬停在法杖上 = 松手就镶进槽位 ★
+	# 整根法杖罩一层青蓝色，和合成的金色、可放的绿色都区分开
+	var wand := player.grid.socket_target(held, origin)
+	if wand != null:
+		for cell in wand.cells():
+			draw_rect(_cell_rect(cell), Color(0.35, 0.80, 1.0, 0.45), true)
+		return
+
+	# ★ 悬停在同款宝石上 = 松手就合成 ★ 目标格画成金色，和红/绿区分开
+	if player.grid.merge_target(held, origin) != null:
+		draw_rect(_cell_rect(origin), Color(1.0, 0.85, 0.30, 0.55), true)
+		return
+
 	var ok := player.grid.can_place(held, origin, held_rot)
 	var col := Color(0.40, 0.95, 0.45, 0.45) if ok else Color(1.0, 0.35, 0.35, 0.40)
 

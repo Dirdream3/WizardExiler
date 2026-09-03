@@ -24,6 +24,32 @@ static func gem_short(gem) -> String:
 	return "?" if gem == null else String(gem.short_name)
 
 
+## 图标资源路径的缓存：id → Texture2D 或 null（null 也要记住，别每帧都去查文件）
+static var _icon_cache: Dictionary = {}
+
+
+## 宝石/装备的图标文件路径。没有对应文件时返回 ""。
+## ★ 图标按 id 找（assets/icons/<id>.webp），和颜色一样是 UI 层的映射 ★
+##   —— combat/ 和 data/ 里不放任何资源路径，加一件新内容只要丢一张同名图进目录。
+static func icon_path(gem) -> String:
+	if gem == null:
+		return ""
+	var path := "res://assets/icons/%s.webp" % String(gem.id)
+	return path if ResourceLoader.exists(path, "Texture2D") else ""
+
+
+## 宝石/装备的图标贴图。没有图标返回 null，调用方退回文字短名 ——
+## 新加的内容还没画图时，格子上至少有个字，不会变成无名色块。
+static func gem_icon(gem) -> Texture2D:
+	if gem == null:
+		return null
+	var id := String(gem.id)
+	if not _icon_cache.has(id):
+		var path := icon_path(gem)
+		_icon_cache[id] = load(path) if path != "" else null
+	return _icon_cache[id]
+
+
 ## 格子的颜色：装备金褐色，辅助宝石绿色，主动技能石按元素分色。
 ## ★ 颜色从类型和标签算出来，而不是写在数据里 ★ —— combat/ 那边不该关心怎么画。
 static func gem_color(gem) -> Color:
@@ -31,6 +57,8 @@ static func gem_color(gem) -> Color:
 		return Color(0.13, 0.13, 0.18)
 	if gem is EquipItem:
 		return Color(0.72, 0.60, 0.36)
+	if gem is CatalystGem:
+		return Color(0.62, 0.45, 0.78)   # 触媒：紫色，和普通辅助的绿区分开
 	if gem is SupportGem:
 		return Color(0.46, 0.72, 0.40)
 	var tags: int = gem.tags

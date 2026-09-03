@@ -16,23 +16,27 @@ const S = preload("res://combat/combat_stat.gd")
 const T = preload("res://combat/combat_tags.gd")
 
 signal cast_requested(from: Vector2, dir: Vector2)
+## 触媒触发了一次施法（World 负责选方向、生成投射物、飘字）。
+## pspec 已经用**被触发那根法杖**的词缀算好了 —— World 直接用，别再 build 一遍。
+signal catalyst_triggered(skill: SkillSpec, pspec: ProjectileSpec, cat_name: String)
 signal damaged(amount: float, is_crit: bool)
 signal healed(amount: float)
 ## 技能石 / 辅助宝石 / 等级有任何变化（背包 UI 和 HUD 靠它刷新）
 signal gems_changed
 signal died
 
-## 魔力每秒回复
+## 魔力每秒回复的**基础值**。实际回复走属性系统（S.MANA_REGEN）——
+## 装备上的「+N 魔力回复」「提高 N% 魔力回复」都能在这上面加成（照抄怪物追击速度的做法）。
 const MANA_REGEN := 12.0
 
 var stats: CombatEntity
 
 ## ★ 背包网格：所有宝石都住在这里面（背包乱斗那种）★
-##   辅助宝石的箭头指进哪颗主动技能石，就辅助哪颗 —— 所以「怎么摆」就是构筑。
-##   没有"技能栏"和"背包"之分，摆放位置本身就是一切。
+##   法杖是技能的载体：技能宝石镶进法杖槽才能施放；
+##   辅助宝石的箭头指着哪根法杖，就辅助它槽里的技能 —— 「怎么摆」就是构筑。
 var grid := GemGrid.new()
 
-## 当前在用的是第几颗主动技能石（`grid.skill_items()` 里的下标，Q 键循环）
+## 当前在用的是第几根"镶着宝石的法杖"（`grid.skill_items()` 里的下标，Q 键循环）
 var skill_index := 0
 
 ## 读存档 / 重置的过程中把存盘关掉，免得拿一个半成品网格覆盖存档
@@ -51,6 +55,12 @@ var can_aim := true
 var _cast_cd := 0.0
 var _hit_flash := 0.0
 
+## 触媒缓存：网格里所有「箭头连着某根法杖的触媒」。rebuild() 时重扫，
+## 免得每帧去跑 supports_for。元素是 { "wand": GemGrid.Placed, "cat": CatalystGem }
+var _catalysts: Array = []
+## 上一物理帧的位置（疾行触媒按实际位移计数，撞墙蹭着走不算满速）
+var _last_pos := Vector2.INF
+
 @onready var sprite: Sprite2D = $Sprite
 @onready var shadow: Sprite2D = $Shadow
 
@@ -67,12 +77,17 @@ func _ready() -> void:
 	add_to_group(&"player")
 
 
-## 开局：有存档就照存档摆，没有就铺默认摆法。
+## 开局：局模式问 RunSession 要背包（一颗孤石或局存档）；
+## 沙盒模式走老路：有存档照存档摆，没有铺默认摆法。
 func _setup_gems() -> void:
 	# ★ 加载期间不许存盘 ★ 否则会拿一个还没填完的网格覆盖掉存档
 	_suppress_save = true
 	grid = GemGrid.new()
-	if not GemSave.load_into(self):
+	if RunSession.enabled:
+		# ★ 局模式不走 GemSave ★ —— 它会"把图鉴里缺的自动补进背包"，
+		#   而局模式的全部意义就是从一颗孤石开始，什么都要靠打
+		RunSession.setup_backpack(self)
+	elif not GemSave.load_into(self):
 		_default_layout()
 	_suppress_save = false
 	set_skill(skill_index)   # 会顺手 rebuild + 存一次盘（把格式规整一遍）
@@ -80,7 +95,10 @@ func _setup_gems() -> void:
 
 ## 把背包恢复成出厂摆法（界面上的「重置背包」按钮）。
 ## 加了存档之后，摆乱了光靠重开是回不去的 —— 所以必须留一个后路。
+## ★ 局模式下是禁用的 ★ —— 出厂摆法带全套装备，等于一键作弊。
 func reset_backpack() -> void:
+	if RunSession.enabled:
+		return
 	_suppress_save = true
 	grid = GemGrid.new()
 	_default_layout()
@@ -91,42 +109,65 @@ func reset_backpack() -> void:
 
 ## 默认摆法。
 ##
-## 故意摆成"电球术已经连了 3 颗辅助、剩下的堆在下面"——
-## 这样第一次进游戏就能看到箭头是怎么连的，而不是面对一堆散件不知道从哪下手。
+## 故意摆成"橡木法杖里镶着电球术、三颗辅助的箭头指着法杖"——
+## 这样第一次进游戏就能看懂两件事：宝石要镶进法杖、箭头指着法杖才生效。
 func _default_layout() -> void:
-	# 开局摆成这样（宝石都是 1 格，装备占大块）：
+	# 开局摆成这样（法杖 1×3 竖着，◈ 表示槽里镶着宝石）：
 	#
-	#   col   0    1    2    3    4    5    6    7
-	#   row0  杖   头   头   .    .    .    靴   靴
-	#   row1  杖   头   头   .    .    .    靴   靴
-	#   row2  杖   .    .    .    .    .    .    .
-	#   row3  .    多▶  电  ◀久   .    .    戒   .
-	#   row4  .    .    闪▲  .    .    .    .    .
-	#   row5  火   .    .    .    .    .    .    .
-	#   row6  穿   叉   弹   反   速   暴   .    .
+	#   col   0     1    2    3    4    5    6    7
+	#   row0  杖◈  ◀多   .    杖'   珀   戒   头   头
+	#   row1  杖   ◀闪   .    杖'   .    .    头   头
+	#   row2  杖   ◀久   .    .    .    .    靴   靴
+	#   row3  .    .     带   带   带   .    靴   靴
+	#   row4  弧   寒    冰   节   元   疾   缓   爆
+	#   row5  穿   叉    弹   反   速   暴   霜   .
+	#   row6  雷   炎    凝   连   行   钟   .    .   ← 触媒（紫色，条件触发）
 	#
-	# ★ 电球术被三个方向的箭头指着 ★ 一进游戏就能看懂"箭头 = 连接"这件事。
-	# 技能石只占 1 格 → 四面最多 4 个箭头位，天然就是 PoE 的「4 连」。
+	# ★ 橡木法杖（杖）镶着电球术，三颗辅助从右侧一列箭头朝左指进法杖 ★
+	# ★ 见习法杖（杖'）镶着火球术 —— Q 在两根法杖之间切换 ★
+	# 法杖占 3 格 → 周身最多 8 个箭头位，比单格宝石天然的 4 连上限更高。
 	var layout := {
-		# 装备（不用连箭头，放着就生效）
+		# 装备。法杖是技能载体；其它装备不用连箭头，放着就生效
 		&"staff":            [Vector2i(0, 0), 0],
-		&"iron_helm":        [Vector2i(1, 0), 0],
-		&"traveller_boots":  [Vector2i(6, 0), 0],
-		&"ring_of_flame":    [Vector2i(6, 3), 0],
-		# 主动技能石。★ skill_items() 按 y 再按 x 排序，靠上的那颗是开局的当前技能 ★
-		&"spark":            [Vector2i(2, 3), 0],
-		&"fireball":         [Vector2i(0, 5), 0],
-		# 三颗箭头指进电球术：左、右、下各一个方向
-		&"sup_multi":        [Vector2i(1, 3), 0],   # ▶ 指到 (2,3)
-		&"sup_duration":     [Vector2i(3, 3), 2],   # ◀ 指到 (2,3)
-		&"sup_lightning":    [Vector2i(2, 4), 3],   # ▲ 指到 (2,3)
-		# 剩下的排在最后一行，箭头都指着邻居（不是技能石 → 灰色），等你自己去摆
-		&"sup_pierce":       [Vector2i(0, 6), 0],
-		&"sup_fork":         [Vector2i(1, 6), 0],
-		&"sup_chain":        [Vector2i(2, 6), 0],
-		&"sup_bounce":       [Vector2i(3, 6), 0],
-		&"sup_faster_cast":  [Vector2i(4, 6), 0],
-		&"sup_crit":         [Vector2i(5, 6), 0],
+		&"apprentice_wand":  [Vector2i(3, 0), 0],
+		&"sapphire_amulet":  [Vector2i(4, 0), 0],
+		&"ring_of_flame":    [Vector2i(5, 0), 0],
+		&"iron_helm":        [Vector2i(6, 0), 0],
+		&"traveller_boots":  [Vector2i(6, 2), 0],
+		&"arcane_belt":      [Vector2i(2, 3), 0],
+		# 没镶进法杖的技能宝石只是库存（不能施放），排在 row4 等你换着玩
+		&"arc":              [Vector2i(0, 4), 0],
+		&"frostbolt":        [Vector2i(1, 4), 0],
+		&"freezing_pulse":   [Vector2i(2, 4), 0],
+		# 三颗辅助箭头朝左（rot2），各指进橡木法杖的一格
+		&"sup_multi":        [Vector2i(1, 0), 2],   # ◀ 指到 (0,0)
+		&"sup_lightning":    [Vector2i(1, 1), 2],   # ◀ 指到 (0,1)
+		&"sup_duration":     [Vector2i(1, 2), 2],   # ◀ 指到 (0,2)
+		# 剩下的排在最后几行，箭头都指着邻居（不是法杖 → 灰色），等你自己去摆
+		&"sup_inspiration":  [Vector2i(3, 4), 0],
+		&"sup_ele_focus":    [Vector2i(4, 4), 0],
+		&"sup_fast_proj":    [Vector2i(5, 4), 0],
+		&"sup_slow_proj":    [Vector2i(6, 4), 0],
+		&"sup_crit_damage":  [Vector2i(7, 4), 0],
+		&"sup_pierce":       [Vector2i(0, 5), 0],
+		&"sup_fork":         [Vector2i(1, 5), 0],
+		&"sup_chain":        [Vector2i(2, 5), 0],
+		&"sup_bounce":       [Vector2i(3, 5), 0],
+		&"sup_faster_cast":  [Vector2i(4, 5), 0],
+		&"sup_crit":         [Vector2i(5, 5), 0],
+		&"sup_cold":         [Vector2i(6, 5), 0],
+		# 触媒（特殊辅助）：先摆成不指法杖的灰箭头，想用哪颗自己挪
+		&"cat_shock":        [Vector2i(0, 6), 0],
+		&"cat_ignite":       [Vector2i(1, 6), 0],
+		&"cat_chill":        [Vector2i(2, 6), 0],
+		&"cat_hits":         [Vector2i(3, 6), 0],
+		&"cat_move":         [Vector2i(4, 6), 0],
+		&"cat_timer":        [Vector2i(5, 6), 0],
+	}
+	# 哪颗宝石开局就镶在哪根法杖里（这两颗不进网格，它们住在法杖身上）
+	var socket_plan := {
+		&"staff": &"spark",
+		&"apprentice_wand": &"fireball",
 	}
 
 	var everything: Array = []
@@ -134,8 +175,14 @@ func _default_layout() -> void:
 	everything.append_array(Gems.all_gems())
 	for thing in everything:
 		var id: StringName = thing.id
-		if id == &"spark":
-			(thing as SkillGem).level = 8        # 主打技能，给个能玩的等级
+		if thing is EquipItem and socket_plan.has(id):
+			var gem = Gems.make_gem(socket_plan[id])
+			if gem != null:
+				if gem.id == &"spark":
+					(gem as SkillGem).level = 4   # 主打技能，给个能玩的等级（上限 5）
+				(thing as EquipItem).socketed = gem
+		elif thing is SkillGem and socket_plan.values().has(id):
+			continue   # 已经镶进法杖了，别再往网格里放一颗重复的
 		var placed: GemGrid.Placed = null
 		if layout.has(id):
 			placed = grid.place(thing, layout[id][0], layout[id][1])
@@ -153,7 +200,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 # ------------------------------------------------------------------ 宝石
 
-## 当前在用的那颗主动技能石（在网格里的那一件）
+## 当前在用的那根法杖（在网格里的那一件；技能宝石在它的槽里 skill_gem()）
 func active_item() -> GemGrid.Placed:
 	var skills := grid.skill_items()
 	if skills.is_empty():
@@ -169,20 +216,31 @@ func active_link() -> GemLink:
 ## ★ 宝石有任何变动都要调它 ★
 ##
 ## 做两件事：
-##   ① 把当前这一格的技能重新展开成 SkillSpec（等级变了、辅助变了都要重算）
-##   ② 把当前这一格辅助宝石的词缀整层换进 stats.skill_mods
+##   ① 把当前法杖槽里的技能重新展开成 SkillSpec（等级变了、辅助变了都要重算）
+##   ② 把「当前法杖自己的词缀 + 指着它的辅助宝石」整层换进 stats.skill_mods
 ##
-## ②就是"辅助宝石只对它连着的技能生效"的实现 —— 换一格，整层直接换掉，
-## 不用一条条 remove_by_source，也不会串味。
+## ②就是"法杖和辅助宝石都只对这根法杖里的技能生效"的实现（ADR-023）——
+## Q 切法杖时整层直接换掉，不用一条条 remove_by_source，也不会串味。
 func rebuild() -> void:
 	var link := active_link()
 	skill = link.skill()
 	stats.skill_mods.clear()
 	stats.skill_mods.add_all(link.mods())
 
-	# ★ 装备：只要在背包里就生效，不用连箭头 ★ 和 skill_mods 一样整层重建
+	# ★ 普通装备：只要在背包里就生效，不用连箭头 ★ 和 skill_mods 一样整层重建。
+	# 法杖不在这层 —— 它的词缀在上面的 link.mods() 里，只跟着自己槽里的技能走
 	stats.equip_mods.clear()
 	stats.equip_mods.add_all(grid.equip_mods())
+
+	# ★ 触媒缓存也整套重扫 ★ —— 背包一变，谁连着谁就可能变了。
+	#   注意扫的是**所有**镶着宝石的法杖，不只是当前那根：触媒的意义就是
+	#   "副法杖挂条件自动打"，主手照常手动施法
+	_catalysts.clear()
+	for it in grid.skill_items():
+		for s in grid.supports_for(it):
+			var cg = (s as GemGrid.Placed).gem
+			if cg is CatalystGem:
+				_catalysts.append({"wand": it, "cat": cg})
 	# 把头盔挪出去 → 生命上限掉下来 → 当前血不能还挂在旧上限上
 	stats.life = minf(stats.life, stats.max_life())
 	stats.mana = minf(stats.mana, stats.max_mana())
@@ -190,8 +248,12 @@ func rebuild() -> void:
 	gems_changed.emit()
 	# 背包一有变动就存盘。文件很小（十几件宝石的 JSON），
 	# 而且变动只在拿起/放下/升级/切技能时发生，不是每帧，所以随手存就行。
+	# 局模式存进局存档（背包属于这一局），沙盒模式存老的 backpack.json。
 	if not _suppress_save:
-		GemSave.save(self)
+		if RunSession.enabled:
+			RunSession.save(self)
+		else:
+			GemSave.save(self)
 
 
 ## 切到第 index 颗主动技能石（会自动绕回来，所以可以一直 +1）。
@@ -214,13 +276,39 @@ func pick_up_at(cell: Vector2i) -> GemGrid.Placed:
 
 
 ## 往网格里放一件。放下了返回 ""，放不下返回原因。
+## ★ 同款宝石叠放 = 合成升级 ★ 优先于普通的放置判定。
 func place_gem(gem, origin: Vector2i, rot: int) -> String:
+	var target := grid.merge_target(gem, origin)
+	if target != null:
+		grid.merge(gem, target)   # 手上那颗被吃掉，不再进网格
+		rebuild()
+		return ""
+	var merge_why := grid.merge_reject_reason(gem, origin)
+	if merge_why != "":
+		return merge_why          # 同款但满级：说清原因，别报"那里已经有东西了"
 	var why := grid.reject_reason(gem, origin, rot)
 	if why != "":
 		return why
 	grid.place(gem, origin, rot)
 	rebuild()
 	return ""
+
+
+## 把手上的技能宝石镶进一根法杖。规则在 GemGrid.socket()：
+##   空槽 = 镶入；槽里同款 = 合成升级；槽里别的 = 交换。
+## 返回被换出来的旧宝石（镶入/合成时是 null），调用方把它放回手上。
+func socket_gem(gem: SkillGem, wand: GemGrid.Placed):
+	var old = grid.socket(gem, wand)
+	set_skill(skill_index)   # 多了一根能用的法杖，下标要重新夹；顺手 rebuild + 存盘
+	return old
+
+
+## 把一根法杖槽里的宝石取出来并返回（槽是空的返回 null）。
+func unsocket_gem(wand: EquipItem) -> SkillGem:
+	var gem := wand.socketed
+	wand.socketed = null
+	set_skill(skill_index)   # 少了一根能用的法杖，下标要重新夹；顺手 rebuild + 存盘
+	return gem
 
 
 ## 升 / 降一颗宝石的等级（+1 / -1）。
@@ -254,11 +342,22 @@ func _physics_process(delta: float) -> void:
 
 	# --- 资源与冷却 ---
 	_cast_cd = maxf(0.0, _cast_cd - delta)
-	stats.mana = minf(stats.max_mana(), stats.mana + MANA_REGEN * delta)
+	stats.mana = minf(stats.max_mana(),
+			stats.mana + stats.get_stat(S.MANA_REGEN, T.NONE, MANA_REGEN) * delta)
 
 	# --- 施法 ---
 	if Input.is_action_pressed(&"cast") and _cast_cd <= 0.0 and can_aim:
 		_try_cast()
+
+	# --- 触媒：移动 / 计时事件由自己产生，然后统一泵一遍触发 ---
+	if _last_pos == Vector2.INF:
+		_last_pos = global_position
+	var moved := global_position.distance_to(_last_pos)
+	_last_pos = global_position
+	if moved > 0.01:
+		notify_catalyst_event(CatalystGem.Trigger.MOVE_DISTANCE, moved)
+	notify_catalyst_event(CatalystGem.Trigger.INTERVAL, delta)
+	_pump_catalysts()
 
 	# --- 受击闪白 ---
 	if _hit_flash > 0.0:
@@ -283,6 +382,55 @@ func _try_cast() -> void:
 
 	sprite.flip_h = dir.x < 0.0
 	cast_requested.emit(global_position + Vector2(0, -7), dir)
+
+
+# ------------------------------------------------------------------ 触媒
+
+## 网格里有没有连着法杖的触媒（GemGridView 靠它决定要不要为进度条定期重画）
+func has_catalysts() -> bool:
+	return not _catalysts.is_empty()
+
+
+## 场上发生了触媒关心的事件（击中 / 施加异常由 World 喂进来；移动 / 计时自己产）。
+## ★ 这里只涨进度 ★ 真正的触发尝试在 _pump_catalysts（每物理帧一次）——
+## 这样"到门槛但蓝不够"的触媒在回蓝之后也能自动补上，不用等下一个事件。
+func notify_catalyst_event(kind: int, amount: float = 1.0) -> void:
+	for c in _catalysts:
+		(c["cat"] as CatalystGem).advance(kind, amount)
+
+
+## 把进度到门槛的触媒挨个尝试触发。成功才清进度（蓝不够就留着，回头再试）。
+func _pump_catalysts() -> void:
+	for c in _catalysts:
+		var cat := c["cat"] as CatalystGem
+		if not cat.ready_to_fire():
+			continue
+		if _try_trigger(c["wand"] as GemGrid.Placed, cat):
+			cat.consume()
+
+
+## 触发一次：无施法动作（不占 _cast_cd、不转身），但正常扣蓝。
+## 返回 false = 这次没触发成（蓝不够 / 法杖空了）。
+func _try_trigger(wand: GemGrid.Placed, cat: CatalystGem) -> bool:
+	var link := grid.link_for(wand)
+	var tskill := link.skill()
+	if tskill == null:
+		return false
+	if stats.mana < tskill.mana_cost:
+		return false   # ★ 蓝不够不触发 ★ 进度保持在门槛上
+	stats.mana -= tskill.mana_cost
+
+	# ★ 被触发的可能不是当前法杖 ★ 投射物参数得用**它那套**词缀
+	# （法杖自己的 + 指着它的辅助）算，算完立刻把 skill_mods 换回当前法杖的。
+	# 投射物飞行途中命中时用的仍是"彼时的当前词缀"——和手动切技能同一个已知误差。
+	stats.skill_mods.clear()
+	stats.skill_mods.add_all(link.mods())
+	var pspec := ProjectileSpec.build(stats, tskill)
+	stats.skill_mods.clear()
+	stats.skill_mods.add_all(active_link().mods())
+
+	catalyst_triggered.emit(tskill, pspec, cat.display_name)
+	return true
 
 
 ## 挨打。伤害已经由 DamagePipeline 算好了，这里只负责扣血和表现。

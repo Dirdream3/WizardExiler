@@ -50,10 +50,13 @@ func _ready() -> void:
 	if state == null:
 		state = ProjectileState.new(ProjectileSpec.new())
 
-	# 外观按技能标签选：闪电系用电球贴图 + 紫色拖尾，其它用火球
+	# 外观按技能标签选：闪电系用电球贴图 + 紫色拖尾，冰系用冰晶 + 冰蓝拖尾，其它用火球
 	if skill != null and (skill.tags & T.LIGHTNING) != 0:
 		sprite.texture = Art.spark()
 		trail.default_color = Color(0.78, 0.62, 1.0, 0.5)
+	elif skill != null and (skill.tags & T.COLD) != 0:
+		sprite.texture = Art.frostbolt()
+		trail.default_color = Color(0.60, 0.85, 1.0, 0.5)
 	else:
 		sprite.texture = Art.fireball()
 
@@ -143,6 +146,11 @@ func _on_body_entered(body: Node2D) -> void:
 	if _rng.randf() <= skill.on_hit_chance:
 		for b in skill.on_hit_buffs:
 			e.stats.apply_buff(b, source)
+			# ★ 触媒要数"施加了几次异常" ★ 用 behaviour 通道报给 World
+			#（顺便进 behaviour_counts，冒烟测试也靠它验"事件真的上报了"）。
+			# ★ 触媒触发出来的弹不上报 ★ —— 触发产物再喂触媒就闭环了（ADR-026）
+			if not state.from_trigger:
+				behaviour.emit("buff_%s" % b.id, global_position)
 
 	hit_enemy.emit(e, r)
 

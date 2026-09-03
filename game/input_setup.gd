@@ -17,6 +17,8 @@ static func ensure() -> void:
 	_bind(&"toggle_debug", [KEY_TAB])
 	_bind(&"restart",    [KEY_R])
 	_bind(&"switch_skill", [KEY_Q])
+	# 调试控制台（往背包里生成任意物品）。` 是主键位，F1 给没有 ` 键的键盘
+	_bind(&"toggle_console", [KEY_QUOTELEFT, KEY_F1])
 
 
 static func _bind(action: StringName, keys: Array, buttons: Array = []) -> void:

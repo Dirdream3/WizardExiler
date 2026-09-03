@@ -58,7 +58,10 @@ func _physics_process(delta: float) -> void:
 		var to_target := target.global_position - global_position
 		var dist := to_target.length()
 		if dist > ATTACK_RANGE:
-			velocity = to_target.normalized() * CHASE_SPEED
+			# ★ 追击速度走属性系统，基础值仍是 CHASE_SPEED 常量 ★
+			#   这样「冰缓」（移动速度 -30%）才真的能让怪追不上你；
+			#   没有任何词缀/Debuff 时，结果和直接用常量一模一样。
+			velocity = to_target.normalized() * stats.get_stat(S.MOVE_SPEED, 0, CHASE_SPEED)
 		else:
 			velocity = velocity.lerp(Vector2.ZERO, 0.3)
 			if _attack_cd <= 0.0:

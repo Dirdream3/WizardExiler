@@ -32,6 +32,12 @@ var hit_ids: Array[int] = []
 ## **刚刚**打过的那个。规则见 can_hit()
 var last_hit_id: int = -1
 
+## ★ 这一发是不是触媒触发出来的（ADR-026 补充）★
+## 触发产物的击中 / 施加异常**不再给任何触媒攒进度** ——
+## 否则"感电触媒 → 电球 → 施加感电 → 又触发"就闭环了，没法平衡。
+## PoE 的同款规则：被触发的技能不能再触发别的触发。分叉出来的子弹也继承这个标记。
+var from_trigger := false
+
 var _wander_timer: float = 0.0
 
 
@@ -185,6 +191,7 @@ func clone_for_fork() -> ProjectileState:
 	c.bounces_done = bounces_done
 	c.hit_ids = hit_ids.duplicate()
 	c.last_hit_id = last_hit_id
+	c.from_trigger = from_trigger   # 触发产物分叉出来的还是触发产物，不喂触媒
 	return c
 
 

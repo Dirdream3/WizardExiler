@@ -26,6 +26,14 @@ var height: int = 1
 ## 这样脱下来时 `remove_by_source(id)` 就能整组摘掉
 var mods: Array = []
 
+## ★ 镶嵌槽位数：法杖 = 1，其它装备 = 0 ★
+## 法杖是**技能的载体**：技能宝石必须镶进法杖才能施放，
+## 辅助宝石的箭头指着法杖，就对里面镶着的技能宝石生效。
+var socket_count: int = 0
+## 镶在槽里的技能宝石（socket_count > 0 时才有意义）。
+## ★ 宝石住在装备身上，不占网格格子 ★ —— 拿起法杖时宝石跟着一起走。
+var socketed: SkillGem = null
+
 # 装备暂时不随等级成长（max_level = 1），但要留着这两个成员 ——
 # 界面上的 [-] [+] 是对"当前显示的东西"操作的，不区分宝石还是装备。
 var level: int = 1
@@ -41,6 +49,11 @@ func _init(p_id: StringName = &"", p_name: String = "", p_w: int = 1, p_h: int =
 
 func clamp_level(lv: int) -> int:
 	return clampi(lv, 1, max_level)
+
+
+## 这件装备是不是"技能载体"（带镶嵌槽的法杖）
+func has_socket() -> bool:
+	return socket_count > 0
 
 
 ## 按 id 打上 source 之后的实际词缀
@@ -61,5 +74,14 @@ func tooltip() -> String:
 	l.append("[color=#7a7a8c]────────────[/color]")
 	for m in build_mods():
 		l.append("  · %s" % (m as Modifier).describe())
-	l.append("[color=#7a7a8c]放在背包里就生效，不需要连箭头[/color]")
+	if has_socket():
+		if socketed != null:
+			l.append("[color=#8fd0ff]◈ 镶嵌中：「%s」Lv%d[/color]" % [socketed.display_name, socketed.level])
+		else:
+			l.append("[color=#9a9aac]◈ 槽位是空的 —— 拿一颗技能宝石点上来镶入[/color]")
+		if not mods.is_empty():
+			l.append("[color=#7a7a8c]★ 法杖的词缀只对槽里镶着的技能生效 ★[/color]")
+		l.append("[color=#7a7a8c]辅助宝石的箭头指着法杖，就对镶着的技能生效[/color]")
+	else:
+		l.append("[color=#7a7a8c]放在背包里就生效，不需要连箭头[/color]")
 	return "\n".join(l)

@@ -19,8 +19,11 @@ config/features=PackedStringArray("4.4", "GL Compatibility")
 ; 700×400 = 左侧 300 的常驻面板 + 右侧 400×400 的正方形战斗画面
 window/size/viewport_width=700
 window/size/viewport_height=400
-window/size/window_width_override=1260
-window/size/window_height_override=720
+; ★ 窗口开 2 倍（1400×800）★ —— 正好是内容分辨率的整数倍：
+;   像素画每个点精确放大成 2×2，不会出现 1.8 倍那种宽窄不一的花纹；
+;   文字走 canvas_items 拉伸，按窗口分辨率重新渲染，是清晰的。
+window/size/window_width_override=1400
+window/size/window_height_override=800
 window/stretch/mode="canvas_items"
 
 [rendering]

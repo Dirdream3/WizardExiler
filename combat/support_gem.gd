@@ -25,16 +25,18 @@ var required_tags: int = CombatTags.NONE
 ## 连上后给技能**补**的标签。默认 0
 var added_tags: int = CombatTags.NONE
 
+## ★ 辅助宝石没有等级（ADR-024）★ 词缀数值是固定的。
+## 这两个字段留着只是为了让 UI / 存档能把"格子里的任何东西"统一处理 ——
+## 和 EquipItem 一样：max_level = 1 → 合成、升级奖励、[-]/[+] 全都自动跳过它。
+## 重复拿到的辅助宝石不是废件：拿去给另一根法杖配同款连线。
 var level: int = 1
-var max_level: int = 20
+var max_level: int = 1
 
 ## 魔力消耗倍率。1.4 = 技能变贵 40%
 var mana_multiplier: float = 1.0
 
-## 1 级时提供的词缀模板
+## 提供的词缀模板
 var mods: Array = []
-## 每升 1 级，对应 mods[i].value 的增量（可以不填，默认 0 = 不随等级变化）
-var mod_growth: Array = []
 
 
 func _init(p_id: StringName = &"", p_name: String = "", p_required: int = CombatTags.NONE) -> void:
@@ -53,17 +55,12 @@ func source_key() -> StringName:
 	return StringName("gem_%s" % id)
 
 
-## 按当前等级生成实际生效的词缀。
+## 生成实际生效的词缀（辅助宝石没有等级，数值就是模板上的数值，只统一补 source）。
 func build_mods() -> Array:
 	var out: Array = []
-	for i in mods.size():
-		var m := mods[i] as Modifier
-		var growth: float = float(mod_growth[i]) if i < mod_growth.size() else 0.0
-		out.append(Modifier.new(
-			m.stat, m.kind,
-			m.value + growth * float(level - 1),
-			m.required_tags,
-			source_key()))
+	for m in mods:
+		var mod := m as Modifier
+		out.append(Modifier.new(mod.stat, mod.kind, mod.value, mod.required_tags, source_key()))
 	return out
 
 
@@ -73,8 +70,8 @@ func clamp_level(lv: int) -> int:
 
 func tooltip() -> String:
 	var l := PackedStringArray()
-	l.append("[b][color=#8fd45a]%s[/color][/b]  [color=#9a9aac]等级 %d/%d[/color]" % [
-		display_name, level, max_level])
+	# 辅助宝石没有等级，标题旁只标类型
+	l.append("[b][color=#8fd45a]%s[/color][/b]  [color=#9a9aac]辅助宝石[/color]" % display_name)
 	if required_tags != CombatTags.NONE:
 		l.append("[color=#c8a24a]只能连：【%s】技能[/color]" % CombatTags.describe(required_tags))
 	else:

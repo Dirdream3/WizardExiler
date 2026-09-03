@@ -14,6 +14,7 @@ enum {
 	CRIT_MULTI,        ## 暴击伤害倍率（1.5 = 150%）
 	MAX_LIFE,          ## 生命上限
 	MAX_MANA,          ## 魔力上限
+	MANA_REGEN,        ## 魔力回复（点/秒）。基础值由 Player 传入，装备词缀在其上加成
 	ARMOUR,            ## 护甲（减物理）
 	EVASION,           ## 闪避值
 	MOVE_SPEED,        ## 移动速度
@@ -56,6 +57,7 @@ static func stat_name(stat: int) -> String:
 		CRIT_MULTI:        return "暴击伤害"
 		MAX_LIFE:          return "生命上限"
 		MAX_MANA:          return "魔力上限"
+		MANA_REGEN:        return "魔力回复"
 		ARMOUR:            return "护甲"
 		EVASION:           return "闪避"
 		MOVE_SPEED:        return "移动速度"

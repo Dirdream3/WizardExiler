@@ -13,11 +13,15 @@ extends RefCounted
 var skill_gem: SkillGem = null
 ## Array[SupportGem]
 var supports: Array = []
+## 装着这颗技能石的法杖。★ 法杖的词缀只对槽里的技能生效（ADR-023）★
+## 所以它的词缀和辅助宝石一起走 mods() → skill_mods，不走全局的 equip_mods。
+var wand: EquipItem = null
 
 
-func _init(p_skill: SkillGem = null, p_supports: Array = []) -> void:
+func _init(p_skill: SkillGem = null, p_supports: Array = [], p_wand: EquipItem = null) -> void:
 	skill_gem = p_skill
 	supports = p_supports
+	wand = p_wand
 
 
 func is_empty() -> bool:
@@ -31,9 +35,13 @@ func skill() -> SkillSpec:
 	return skill_gem.build(supports)
 
 
-## 这一组所有辅助宝石提供的词缀（Player 会把它塞进 stats.skill_mods）
+## 这一组的全部词缀：法杖自己的 + 辅助宝石的（Player 会把它塞进 stats.skill_mods）。
+## 法杖词缀混在这层的意义：Q 切到别的法杖时整层换掉 —— 橡木法杖的
+## 「更多 30% 法术伤害」就自动只属于它槽里的那颗技能。
 func mods() -> Array:
 	var out: Array = []
+	if wand != null:
+		out.append_array(wand.build_mods())
 	for s in supports:
 		out.append_array((s as SupportGem).build_mods())
 	return out

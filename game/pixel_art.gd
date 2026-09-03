@@ -24,6 +24,7 @@ static var PALETTE: Dictionary = {
 	"r": Color8(196, 48, 48),
 	"p": Color8(146, 108, 240),   # 电紫（电球术外圈）
 	"c": Color8(214, 238, 255),   # 惨白（电球术芯）
+	"i": Color8(110, 190, 232),   # 冰蓝（冰系投射物外圈）
 }
 
 ## 玩家：戴尖帽的法师，16×16
@@ -93,6 +94,19 @@ const SPARK := [
 ]
 
 
+## 冰系投射物（寒冰弹 / 冰霜脉冲共用），8×8 的冰晶
+const FROSTBOLT := [
+	"...ii...",
+	"..iBBi..",
+	".iBccBi.",
+	"iBccccBi",
+	"iBccccBi",
+	".iBccBi.",
+	"..iBBi..",
+	"...ii...",
+]
+
+
 static var _cache: Dictionary = {}
 
 
@@ -110,6 +124,10 @@ static func fireball() -> ImageTexture:
 
 static func spark() -> ImageTexture:
 	return _cached("spark", func(): return from_ascii(SPARK))
+
+
+static func frostbolt() -> ImageTexture:
+	return _cached("frostbolt", func(): return from_ascii(FROSTBOLT))
 
 
 

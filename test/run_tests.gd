@@ -60,6 +60,32 @@ func _initialize() -> void:
 	_test_cast_rate()
 	_test_gem_tooltip_text()
 	_test_damage_report_text()
+	# --- 局内流程（7 步地图 / 状态机 / 奖励 / 内容）---
+	_test_run_map_shape()
+	_test_run_map_determinism()
+	_test_run_map_guarantees()
+	_test_run_state_flow()
+	_test_run_state_gold_and_save()
+	_test_run_rewards_roll()
+	_test_run_content()
+	_test_room_gold()
+	# --- 内容扩充：电弧 / 冰系技能 / 冰缓 ---（图标能不能加载在 smoke_test 里测）
+	_test_new_actives()
+	_test_chill_buff()
+	_test_cold_support()
+	_test_new_content_in_run()
+	# --- 合成 ---
+	_test_gem_merge()
+	# --- 法杖载体（ADR-020）与 4 层结构（ADR-021）---
+	_test_wand_socket()
+	_test_wand_mods_scope()
+	_test_run_map_floors()
+	# --- 回蓝装备（魔力回复走属性系统）---
+	_test_mana_regen_gear()
+	# --- 触媒（ADR-026）---
+	_test_catalyst_rules()
+	# --- 新辅助：法术节魔 / 元素集中 / 快速·缓速投射 / 暴击伤害 ---
+	_test_new_supports()
 
 	print("\n===================================")
 	print("通过 %d / %d" % [_passed, _passed + _failed])
@@ -580,28 +606,39 @@ func _test_spark_spec() -> void:
 # ---------------------------------------------------------------- 技能石
 
 func _test_gem_level_growth() -> void:
-	_begin("技能石：等级成长")
-	var g := Gems.gem_spark()          # 电球术：1 级 55 点伤 / 10 魔力，每级 +6 / +0.8
+	_begin("技能石：等级成长（1~5 级，不照搬 PoE 的 20 级）")
+	var g := Gems.gem_spark()          # 电球术：1 级 55 点伤 / 10 魔力，每级 +28 / +4
 	_check("默认 1 级", g.level == 1)
+	_check("★ 等级上限是 5 ★（ADR-024）", g.max_level == 5)
 	_close("1 级点伤 55", g.damage_at(1), 55.0)
-	_close("1 级消耗 10", g.mana_at(1), 10.0)
-	_close("8 级点伤 55 + 6×7", g.damage_at(8), 55.0 + 6.0 * 7.0)
-	_close("20 级点伤 55 + 6×19", g.damage_at(20), 55.0 + 6.0 * 19.0)
-	_close("8 级消耗 10 + 0.8×7", g.mana_at(8), 10.0 + 0.8 * 7.0)
+	_close("1 级消耗 6", g.mana_at(1), 6.0)
+	_close("4 级点伤 55 + 28×3", g.damage_at(4), 55.0 + 28.0 * 3.0)
+	_close("5 级点伤 55 + 28×4（≈老曲线满级）", g.damage_at(5), 55.0 + 28.0 * 4.0)
+	_close("4 级消耗 6 + 2×3（消耗涨得比伤害缓，升级是纯奖励）",
+			g.mana_at(4), 6.0 + 2.0 * 3.0)
+
+	# ★ 只有 4 次升级机会 → 每一级都得是明显的一步（至少 +40% 于 1 级点伤）★
+	# 这条断言防的是"把成长值改小回 PoE 曲线"—— 5 级封顶配小成长，升级就没手感了
+	for gem in Gems.all_actives():
+		var sg := gem as SkillGem
+		_check("%s 每级成长 ≥ 1级点伤的 40%%" % sg.display_name,
+				sg.damage_per_level >= sg.base.base_damage * 0.40,
+				"每级 +%.0f / 基础 %.0f" % [sg.damage_per_level, sg.base.base_damage])
+		_check("%s 上限也是 5 级" % sg.display_name, sg.max_level == 5)
 
 	# build() 出来的 SkillSpec 要用**当前等级**的数值
-	g.level = 8
+	g.level = 4
 	var s := g.build()
-	_close("build() 用当前等级的点伤", s.base_damage, 55.0 + 6.0 * 7.0)
+	_close("build() 用当前等级的点伤", s.base_damage, 55.0 + 28.0 * 3.0)
 	_check("标签原样传给 SkillSpec", s.tags == g.tags)
 
 	# ★ 关键：build() 不能改到模板本身 ★
 	# 改了的话等级一升，之前算好的 SkillSpec 会跟着变
 	s.base_damage = 99999.0
-	_close("改返回值不影响模板", g.build().base_damage, 55.0 + 6.0 * 7.0)
+	_close("改返回值不影响模板", g.build().base_damage, 55.0 + 28.0 * 3.0)
 	_close("模板的 1 级伤害没被污染", g.base.base_damage, 55.0)
 
-	_check("等级不会超过上限", g.clamp_level(999) == g.max_level)
+	_check("等级不会超过上限（999 → 5）", g.clamp_level(999) == 5)
 	_check("等级不会低于 1", g.clamp_level(-5) == 1)
 
 
@@ -636,12 +673,18 @@ func _test_gem_tags_and_support_rules() -> void:
 	_check("「暴击几率」无标签要求 → 什么技能都能连",
 			crit.can_support(spark.tags) and crit.can_support(melee.tags))
 
-	# 辅助宝石的词缀数值随等级成长
+	# ★ 辅助宝石没有等级（ADR-024）★ 词缀数值是固定的
 	var m := Gems.support_multi()
+	_check("★ 辅助宝石 max_level = 1（没有等级概念）★", m.max_level == 1)
 	var v1: float = (m.build_mods()[1] as Modifier).value
-	m.level = 20
-	var v20: float = (m.build_mods()[1] as Modifier).value
-	_check("多重投射升级 → 伤害惩罚变小", v20 > v1, "1级 %.4f → 20级 %.4f" % [v1, v20])
+	m.level = m.clamp_level(99)
+	_check("等级字段被夹死在 1，词缀数值不变", m.level == 1
+			and is_equal_approx((m.build_mods()[1] as Modifier).value, v1))
+	var all_flat := true
+	for sup in Gems.all_supports():
+		if (sup as SupportGem).max_level != 1:
+			all_flat = false
+	_check("图鉴里所有辅助宝石都没有等级", all_flat)
 	_check("所有词缀共用一个 source（方便整组拔掉）",
 			(m.build_mods()[0] as Modifier).source == m.source_key())
 
@@ -750,19 +793,21 @@ func _test_gem_grid_placement() -> void:
 			"塞进去 %d 件" % count)
 
 
-## ★★ 背包网格最核心的规则：箭头指着谁就辅助谁 ★★
+## ★★ 背包网格最核心的规则：法杖是技能载体，箭头指着法杖就辅助槽里的技能 ★★
 func _test_gem_grid_arrows() -> void:
-	_begin("★ 背包网格：箭头指着谁就辅助谁 ★")
+	_begin("★ 背包网格：箭头指着法杖，辅助槽里的技能 ★")
 	var g := GemGrid.new()
 	var spark := Gems.gem_spark()          # 闪电|法术|投射物|持续时间
-	var sk := g.place(spark, Vector2i(3, 2), 0)   # 1 格，就在 (3,2)
+	var wand := EquipLibrary.staff()       # 1×3 竖着，占 (3,1)(3,2)(3,3)
+	wand.socketed = spark
+	var wp := g.place(wand, Vector2i(3, 1), 0)
 
-	# ① 箭头朝右、指进技能石 → 连上
+	# ① 箭头朝右、指进法杖 → 连上（辅助的是槽里的电球术）
 	var multi := Gems.support_multi()
-	var m := g.place(multi, Vector2i(2, 2), 0)    # 在 (2,2)，箭头朝右 → (3,2)
+	var m := g.place(multi, Vector2i(2, 2), 0)    # 在 (2,2)，箭头朝右 → (3,2) 法杖中段
 	_check("箭头指向 (3,2)", m.arrow_target() == Vector2i(3, 2), str(m.arrow_target()))
 	_check("★ 连上了 ★", g.arrow_state(m) == "linked", g.arrow_state(m))
-	_check("技能石认得这颗辅助", g.supports_for(sk).size() == 1)
+	_check("法杖认得这颗辅助", g.supports_for(wp).size() == 1)
 
 	# ② 同一颗宝石转个方向 → 箭头指到空地上，连接断掉（位置没变，只是朝向变了）
 	g.remove(m)
@@ -770,47 +815,61 @@ func _test_gem_grid_arrows() -> void:
 	_check("★ 只占 1 格，转方向不挪窝 ★", m.cells().size() == 1 and m.origin == Vector2i(2, 2))
 	_check("转了方向后箭头指向下方", m.arrow_target() == Vector2i(2, 3), str(m.arrow_target()))
 	_check("★ 指着空地 → 断开 ★", g.arrow_state(m) == "idle")
-	_check("技能石这下一颗辅助都没有", g.supports_for(sk).is_empty())
+	_check("法杖这下一颗辅助都没有", g.supports_for(wp).is_empty())
 
-	# ③ 转回去，再从右边、上面各连一颗 —— 1 格技能石四面最多 4 个箭头位（天然 4 连）
+	# ③ 转回去，再从右边、上面各连一颗 —— ★ 指着法杖的哪一格都算 ★
+	#   1×3 的法杖周身有 8 个箭头位，比单格宝石的 4 连上限高，这就是长法杖的价值
 	g.remove(m)
-	m = g.place(multi, Vector2i(2, 2), 0)                    # 左 →
-	var d := g.place(Gems.support_duration(), Vector2i(4, 2), 2)  # 右 ←
-	var l := g.place(Gems.support_lightning(), Vector2i(3, 1), 1) # 上 ↓
-	_check("朝左的箭头指向 (3,2)", d.arrow_target() == Vector2i(3, 2), str(d.arrow_target()))
-	_check("朝下的箭头指向 (3,2)", l.arrow_target() == Vector2i(3, 2), str(l.arrow_target()))
-	_check("★ 三个方向各连一颗 ★", g.supports_for(sk).size() == 3,
-			"实际 %d 颗" % g.supports_for(sk).size())
+	m = g.place(multi, Vector2i(2, 2), 0)                    # 左 → 指 (3,2)
+	var d := g.place(Gems.support_duration(), Vector2i(4, 3), 2)  # 右 ← 指 (3,3) 杖尾
+	var l := g.place(Gems.support_lightning(), Vector2i(3, 0), 1) # 上 ↓ 指 (3,1) 杖头
+	_check("朝左的箭头指向杖尾 (3,3)", d.arrow_target() == Vector2i(3, 3), str(d.arrow_target()))
+	_check("朝下的箭头指向杖头 (3,1)", l.arrow_target() == Vector2i(3, 1), str(l.arrow_target()))
+	_check("★ 指着法杖三个不同的格子，各连一颗 ★", g.supports_for(wp).size() == 3,
+			"实际 %d 颗" % g.supports_for(wp).size())
 
-	# ④ 标签不匹配：箭头指到了，但连不上 —— 而且要能告诉玩家原因
+	# ④ 标签不匹配：箭头指到了法杖，但槽里的技能吃不下 —— 要能告诉玩家原因
 	var g2 := GemGrid.new()
-	var sk2 := g2.place(Gems.gem_fireball(), Vector2i(3, 2), 0)   # 没有【持续时间】标签
+	var wand2 := EquipLibrary.apprentice_wand()
+	wand2.socketed = Gems.gem_fireball()          # 火球术没有【持续时间】标签
+	var wp2 := g2.place(wand2, Vector2i(3, 2), 0)
 	var d2 := g2.place(Gems.support_duration(), Vector2i(2, 2), 0)
-	_check("箭头确实指到了火球术", g2.at(d2.arrow_target()) == sk2)
-	_check("★ 但标签不匹配 → blocked，不是 linked ★", g2.arrow_state(d2) == "blocked")
-	_check("所以它不算辅助", g2.supports_for(sk2).is_empty())
-	_check("但要能查出来是谁被挡了（UI 画红箭头用）", g2.blocked_for(sk2).size() == 1)
+	_check("箭头确实指到了法杖", g2.at(d2.arrow_target()) == wp2)
+	_check("★ 但槽里技能的标签不匹配 → blocked，不是 linked ★", g2.arrow_state(d2) == "blocked")
+	_check("所以它不算辅助", g2.supports_for(wp2).is_empty())
+	_check("但要能查出来是谁被挡了（UI 画红箭头用）", g2.blocked_for(wp2).size() == 1)
 
-	# ⑤ 一颗辅助只有一个箭头 → 不可能同时辅助两颗技能石
+	# ⑤ ★ 裸放的技能宝石不参与连线 ★ —— 它没有载体，指着它和指着空地一样
 	var g3 := GemGrid.new()
-	var a := g3.place(Gems.gem_spark(), Vector2i(0, 0), 0)
-	var b := g3.place(Gems.gem_spark(), Vector2i(3, 0), 0)
-	g3.place(Gems.support_crit(), Vector2i(1, 3), 0)          # 谁都没指着
-	_check("箭头没指着技能石时，两边都没有辅助",
-			g3.supports_for(a).is_empty() and g3.supports_for(b).is_empty())
+	var bare := g3.place(Gems.gem_spark(), Vector2i(3, 2), 0)
+	var at_bare := g3.place(Gems.support_multi(), Vector2i(2, 2), 0)   # 箭头指着裸宝石
+	_check("★ 箭头指着裸宝石 → idle，连不上 ★", g3.arrow_state(at_bare) == "idle")
+	_check("裸宝石也不出现在可施放列表里", g3.skill_items().is_empty())
+	_check("supports_for 对裸宝石返回空", g3.supports_for(bare).is_empty())
 
-	# ⑥ 装备不参与连线：箭头指着装备 = 白指
+	# ⑥ 空槽的法杖：箭头指着它是 idle（镶上宝石会自动连上）
 	var g4 := GemGrid.new()
-	g4.place(EquipLibrary.iron_helm(), Vector2i(3, 2), 0)
-	var at_helm := g4.place(Gems.support_multi(), Vector2i(2, 2), 0)
-	_check("★ 箭头指着装备 → 还是 idle（装备不用连）★", g4.arrow_state(at_helm) == "idle")
+	var empty_wand := g4.place(EquipLibrary.apprentice_wand(), Vector2i(3, 2), 0)
+	var at_empty := g4.place(Gems.support_multi(), Vector2i(2, 2), 0)
+	_check("★ 箭头指着空法杖 → idle ★", g4.arrow_state(at_empty) == "idle")
+	_check("空法杖不算能施放的技能", g4.skill_items().is_empty())
+	# 镶上宝石 → 同一颗辅助立刻连上，什么都不用挪
+	(empty_wand.gem as EquipItem).socketed = Gems.gem_spark()
+	_check("★ 镶上宝石后箭头自动连上 ★", g4.arrow_state(at_empty) == "linked")
+	_check("现在它是能施放的技能了", g4.skill_items().size() == 1)
 
-	# ⑦ link_for：把结果打包给战斗系统
-	var link := g.link_for(sk)
-	_check("link 里是那颗技能石", link.skill_gem == spark)
+	# ⑦ 普通装备不参与连线：箭头指着头盔 = 白指
+	var g5 := GemGrid.new()
+	g5.place(EquipLibrary.iron_helm(), Vector2i(3, 2), 0)
+	var at_helm := g5.place(Gems.support_multi(), Vector2i(2, 2), 0)
+	_check("★ 箭头指着普通装备 → 还是 idle ★", g5.arrow_state(at_helm) == "idle")
+
+	# ⑧ link_for：把"槽里的技能 + 辅助"打包给战斗系统
+	var link := g.link_for(wp)
+	_check("link 里是槽里那颗技能石", link.skill_gem == spark)
 	_check("link 里有 3 颗辅助", link.supports.size() == 3)
-	_close("消耗被三颗辅助的倍率连乘（10 × 1.40 × 1.20 × 1.25）",
-			link.skill().mana_cost, 10.0 * 1.40 * 1.20 * 1.25)
+	_close("消耗被三颗辅助的倍率连乘（6 × 1.40 × 1.20 × 1.25）",
+			link.skill().mana_cost, 6.0 * 1.40 * 1.20 * 1.25)
 	_check("link_for 一个空位 → 空 link", g.link_for(null).is_empty())
 
 
@@ -821,16 +880,20 @@ func _test_gem_grid_arrows() -> void:
 func _test_gem_grid_save() -> void:
 	_begin("背包网格：存档与读档")
 	var g := GemGrid.new()
+	# 法杖 1×3 竖在 (3,1)..(3,3)，槽里镶着 4 级电球术 —— 槽里的宝石也要一起存
 	var spark := Gems.gem_spark()
-	spark.level = 13
-	g.place(spark, Vector2i(3, 1), 0)
-	g.place(Gems.support_multi(), Vector2i(2, 1), 0)      # 箭头 → 连上
-	g.place(Gems.support_duration(), Vector2i(4, 1), 2)   # 箭头 ← 连上
+	spark.level = 4
+	var wand := EquipLibrary.staff()
+	wand.socketed = spark
+	g.place(wand, Vector2i(3, 1), 0)
+	g.place(Gems.support_multi(), Vector2i(2, 1), 0)      # 箭头 → 指杖头，连上
+	g.place(Gems.support_duration(), Vector2i(4, 2), 2)   # 箭头 ← 指杖身，连上
 	g.place(Gems.support_crit(), Vector2i(0, 5), 1)       # 箭头朝下，没连
-	g.place(EquipLibrary.staff(), Vector2i(7, 0), 0)      # 装备也要能存
+	g.place(Gems.gem_fireball(), Vector2i(7, 6), 0)       # 裸宝石（库存）也要能存
 
 	var data := g.to_data()
-	_check("存了 5 件（宝石 + 装备）", data.size() == 5, "实际 %d 件" % data.size())
+	_check("存了 5 件（槽里的电球术住在法杖身上，不单独占一条）",
+			data.size() == 5, "实际 %d 件" % data.size())
 	_check("存的是纯数据（能直接 JSON 序列化）",
 			typeof(JSON.parse_string(JSON.stringify(data))) == TYPE_ARRAY)
 
@@ -840,11 +903,15 @@ func _test_gem_grid_save() -> void:
 	_check("5 件都还原了", loaded == 5, "实际 %d 件" % loaded)
 
 	var sk2: GemGrid.Placed = g2.skill_items()[0]
-	_check("★ 等级记住了 ★", (sk2.gem as SkillGem).level == 13,
-			"实际 %d 级" % (sk2.gem as SkillGem).level)
+	_check("★ 法杖回来了，槽里还镶着电球术 ★", sk2.skill_gem() != null
+			and sk2.skill_gem().id == &"spark")
+	_check("★ 槽里宝石的等级记住了 ★", sk2.skill_gem().level == 4,
+			"实际 %d 级" % sk2.skill_gem().level)
 	_check("★ 位置记住了 ★", sk2.origin == Vector2i(3, 1), str(sk2.origin))
 	_check("★ 朝向记住了 → 箭头还是连着的 ★", g2.supports_for(sk2).size() == 2,
 			"实际连着 %d 颗" % g2.supports_for(sk2).size())
+	_check("★ has_gem 认得槽里的宝石 ★（图鉴补齐靠它判重，漏了会重复补）",
+			g2.has_gem(&"spark"))
 
 	var crit: GemGrid.Placed = null
 	for it in g2.items:
@@ -861,6 +928,14 @@ func _test_gem_grid_save() -> void:
 	_check("存档里有不认识的宝石 → 跳过，其余照常还原",
 			g3.from_data(stale, GemSave.resolve) == 5)
 
+	# ①' 槽里镶的宝石 id 不认识 → 槽空着，法杖本身照常还原
+	var bad_socket := [{"id": "staff", "x": 0, "y": 0, "rot": 0, "level": 1,
+			"socket": {"id": "已删除的宝石", "level": 5}}]
+	var g3b := GemGrid.new()
+	_check("槽里的宝石不认识 → 法杖照常还原、槽空着",
+			g3b.from_data(bad_socket, GemSave.resolve) == 1
+			and (g3b.items[0] as GemGrid.Placed).skill_gem() == null)
+
 	# ② 位置冲突（比如网格改小了、形状改大了）→ 不能把宝石弄丢
 	var overlap := [
 		{"id": "spark", "x": 3, "y": 1, "rot": 0, "level": 1},
@@ -869,7 +944,8 @@ func _test_gem_grid_save() -> void:
 	var g4 := GemGrid.new()
 	_check("位置冲突 → 换个空地放，不丢宝石",
 			g4.from_data(overlap, GemSave.resolve) == 2, "实际 %d 件" % g4.items.size())
-	_check("两颗技能石都在", g4.skill_items().size() == 2)
+	_check("两颗宝石都在（裸宝石是库存，不进 skill_items）",
+			g4.has_gem(&"spark") and g4.has_gem(&"fireball"))
 
 	# ③ 空存档 / 垃圾数据不能炸
 	_check("空存档 → 0 件", GemGrid.new().from_data([], GemSave.resolve) == 0)
@@ -888,28 +964,33 @@ func _test_gem_grid_save() -> void:
 
 
 func _test_skill_mods_layer() -> void:
-	_begin("技能石：辅助宝石只对它连着的技能生效")
+	_begin("技能石：辅助宝石只对它连着的法杖生效")
 	var p := Demo.make_player()
 
-	# 网格里摆一颗电球术，左边挨着放一颗多重投射，箭头指着它
+	# 一根法杖镶电球术、旁边一颗多重投射箭头指着它；另一根法杖镶火球术，没人指
 	var g := GemGrid.new()
-	var sk := g.place(Gems.gem_spark(), Vector2i(3, 2), 0)
-	g.place(Gems.support_multi(), Vector2i(2, 2), 0)
-	var fire := g.place(Gems.gem_fireball(), Vector2i(6, 5), 0)   # 没有箭头指着它
+	var w1 := EquipLibrary.staff()
+	w1.socketed = Gems.gem_spark()
+	var sk := g.place(w1, Vector2i(3, 2), 0)
+	g.place(Gems.support_multi(), Vector2i(2, 2), 0)   # 箭头 → 指进 (3,2) 杖头
+	var w2 := EquipLibrary.apprentice_wand()
+	w2.socketed = Gems.gem_fireball()
+	var fire := g.place(w2, Vector2i(6, 4), 0)         # 没有箭头指着它
 
-	# Player.rebuild() 干的事：把当前这颗技能石的词缀整层换进 skill_mods
+	# Player.rebuild() 干的事：把当前这根法杖的辅助词缀整层换进 skill_mods
 	p.skill_mods.clear()
 	p.skill_mods.add_all(g.link_for(sk).mods())
 	_check("电球术吃到多重投射 → 4+2 = 6 发",
 			ProjectileSpec.build(p, g.link_for(sk).skill()).shot_count() == 6,
 			"实际 %d" % ProjectileSpec.build(p, g.link_for(sk).skill()).shot_count())
 
-	# 切到火球术（没有任何箭头指着它）→ 整层换掉
+	# Q 切到火球术那根法杖（没有任何箭头指着它）→ 整层换掉
 	p.skill_mods.clear()
 	p.skill_mods.add_all(g.link_for(fire).mods())
 	_check("★ 切到火球术后不再是多发 ★",
 			ProjectileSpec.build(p, g.link_for(fire).skill()).shot_count() == 1)
 	_check("skill_mods 已经清空", p.skill_mods.size() == 0)
+	_check("skill_items 是两根镶了宝石的法杖", g.skill_items().size() == 2)
 
 
 ## ★★ 这是用户要求的那张属性清单，逐条对一遍 ★★
@@ -917,18 +998,18 @@ func _test_skill_mods_layer() -> void:
 func _test_spark_gem() -> void:
 	_begin("★ 电球术(Spark)：标准技能石的全部属性 ★")
 	var g := Gems.gem_spark()
-	g.level = 8
+	g.level = 4
 	var s := g.build()
 
 	_check("Tag = 闪电|法术|投射物|持续时间",
 			s.tags == (T.LIGHTNING | T.SPELL | T.PROJECTILE | T.DURATION))
 	_check("Tag 文本读得懂", CombatTags.describe(s.tags).contains("持续时间"),
 			CombatTags.describe(s.tags))
-	_check("等级 8", g.level == 8)
-	_close("消耗（8 级）", s.mana_cost, 10.0 + 0.8 * 7.0)
+	_check("等级 4（上限 5）", g.level == 4 and g.max_level == 5)
+	_close("消耗（4 级）", s.mana_cost, 6.0 + 2.0 * 3.0)
 	_close("施放时间 0.65 秒", s.cast_time, 0.65)
 	_close("投射物速度 150", s.projectile_speed, 150.0)
-	_close("点伤（8 级，单发）", s.base_damage, 55.0 + 6.0 * 7.0)
+	_close("点伤（4 级，单发）", s.base_damage, 55.0 + 28.0 * 3.0)
 	_check("单次发射 4 发", 1 + s.base_extra_projectiles == 4)
 	_close("投射物持续时间 2.4 秒", s.base_duration, 2.4)
 
@@ -943,25 +1024,27 @@ func _test_spark_gem() -> void:
 
 ## 辅助宝石一颗颗连上去，看电球术怎么变。
 func _test_spark_supports() -> void:
-	_begin("★ 电球术：辅助宝石怎么改变它 ★")
+	_begin("★ 电球术：辅助宝石怎么改变它（隔着法杖连）★")
 	var p := Demo.make_player()
-	# 电球术摆在 (3,2)，四周留出位置给箭头
+	# 电球术镶在 1×2 见习法杖里，法杖摆在 (3,2)..(3,3)，四周留出位置给箭头
 	var g := GemGrid.new()
-	var sk := g.place(Gems.gem_spark(), Vector2i(3, 2), 0)
+	var wand := EquipLibrary.apprentice_wand()
+	wand.socketed = Gems.gem_spark()
+	var sk := g.place(wand, Vector2i(3, 2), 0)
 
 	var bare := ProjectileSpec.build(p, g.link_for(sk).skill())
-	_check("没有箭头指着它时 4 发", bare.shot_count() == 4)
+	_check("没有箭头指着法杖时 4 发", bare.shot_count() == 4)
 	_close("存活 2.4 秒", bare.duration, 2.4)
 
-	# ① 左边放「延长持续」，箭头朝右指进来 → 每发活得更久
+	# ① 左边放「延长持续」，箭头朝右指进法杖 → 每发活得更久
 	g.place(Gems.support_duration(), Vector2i(2, 2), 0)
 	p.skill_mods.clear()
 	p.skill_mods.add_all(g.link_for(sk).mods())
 	_close("持续时间 2.4 × 1.45",
 			ProjectileSpec.build(p, g.link_for(sk).skill()).duration, 2.4 * 1.45)
 
-	# ② 再从下面放「多重投射」，箭头朝上指进来 → 发数变多，但扇面不变
-	g.place(Gems.support_multi(), Vector2i(3, 3), 3)   # rot3 = 朝上，指进 (3,2)
+	# ② 再从下面放「多重投射」，箭头朝上指进杖尾 → 发数变多，但扇面不变
+	g.place(Gems.support_multi(), Vector2i(3, 4), 3)   # rot3 = 朝上，指进 (3,3)
 	p.skill_mods.clear()
 	p.skill_mods.add_all(g.link_for(sk).mods())
 	var more := ProjectileSpec.build(p, g.link_for(sk).skill())
@@ -969,7 +1052,7 @@ func _test_spark_supports() -> void:
 	_close("扇面还是 90°（不会扇得更宽）", more.spread_arc_deg, 90.0)
 
 	# ③ 魔力消耗倍率是连乘的：1.20 × 1.40
-	_close("消耗 10 × 1.20 × 1.40", g.link_for(sk).skill().mana_cost, 10.0 * 1.20 * 1.40)
+	_close("消耗 6 × 1.20 × 1.40", g.link_for(sk).skill().mana_cost, 6.0 * 1.20 * 1.40)
 
 	# ④ 伤害惩罚也是"更多"乘区，各自连乘：×0.70（多重投射 1 级）
 	var tags := g.link_for(sk).skill().hit_tags()
@@ -1016,10 +1099,10 @@ func _test_cast_rate() -> void:
 func _test_gem_tooltip_text() -> void:
 	_begin("技能石面板的文本能正常生成")
 	var g := Gems.gem_spark()
-	g.level = 8
+	g.level = 4
 	var txt := g.tooltip([Gems.support_duration()])
 
-	_check("有等级", txt.contains("等级 8/20"))
+	_check("有等级", txt.contains("等级 4/5"))
 	_check("有标签", txt.contains("持续时间") and txt.contains("投射物"))
 	_check("有消耗", txt.contains("消耗"))
 	_check("有施放时间", txt.contains("施放时间"))
@@ -1029,7 +1112,7 @@ func _test_gem_tooltip_text() -> void:
 	_check("有飞行漂移", txt.contains("飞行漂移"))
 	_check("有自带的撞墙反弹", txt.contains("撞墙反弹"))
 	_check("有命中附加效果", txt.contains("感电"))
-	_check("有下一级预览", txt.contains("升到 9 级"))
+	_check("有下一级预览", txt.contains("升到 5 级"))
 
 	# 满级时不该再出现"升到 21 级"
 	g.level = g.max_level
@@ -1042,6 +1125,7 @@ func _test_gem_tooltip_text() -> void:
 
 	# 辅助宝石的面板
 	var sup := Gems.support_duration()
+	_check("★ 辅助宝石面板不显示等级（它没有等级）★", not sup.tooltip().contains("等级"))
 	_check("辅助宝石面板有魔力倍率", sup.tooltip().contains("魔力消耗倍率"))
 	_check("辅助宝石面板写明了连接要求", sup.tooltip().contains("只能连"))
 	_check("无要求的辅助也有说明", Gems.support_crit().tooltip().contains("任何技能"))
@@ -1100,3 +1184,840 @@ func _check(name: String, cond: bool, detail: String = "") -> void:
 
 func _close(name: String, got: float, want: float, eps: float = 0.01) -> void:
 	_check(name, absf(got - want) < eps, "期望 %.4f，实际 %.4f" % [want, got])
+
+
+# ================================================================ 局内流程
+
+func _test_run_map_shape() -> void:
+	_begin("局地图：形状约束")
+	var map := RunMap.generate(42)
+	_check("一共 %d 步" % RunMap.STEPS, map.steps.size() == RunMap.STEPS,
+			"实际 %d" % map.steps.size())
+	var last: Array = map.steps[RunMap.STEPS - 1]
+	_check("最后一步只有一个房间", last.size() == 1)
+	_check("最后一步是最终 Boss", (last[0] as RunMap.Room).type == RunMap.RoomType.BOSS)
+
+	# 中间步的约束对很多种子都要成立，扫一批种子找反例
+	var sizes_ok := true
+	var no_mid_boss := true
+	var distinct_ok := true
+	for seed_v in 50:
+		var m := RunMap.generate(seed_v)
+		for i in RunMap.STEPS - 1:
+			var rooms: Array = m.steps[i]
+			if rooms.size() < RunMap.MIN_ROOMS or rooms.size() > RunMap.MAX_ROOMS:
+				sizes_ok = false
+			var seen := {}
+			for r in rooms:
+				var room := r as RunMap.Room
+				if room.type == RunMap.RoomType.BOSS:
+					no_mid_boss = false
+				if room.type == RunMap.RoomType.COMBAT:
+					# ★ 同一步里战斗奖励不许重复 ★ 重复了"选哪个房"就没意义
+					if seen.has(room.reward):
+						distinct_ok = false
+					seen[room.reward] = true
+	_check("每一步都有 %d~%d 个房间可选（50 个种子）" % [RunMap.MIN_ROOMS, RunMap.MAX_ROOMS], sizes_ok)
+	_check("Boss 不会出现在中间步", no_mid_boss)
+	_check("同一步里的奖励类型互不重复", distinct_ok)
+
+
+func _test_run_map_determinism() -> void:
+	_begin("局地图：种子确定性")
+	# ★ 同种子必须同图 ★ 存档只存种子，读档靠重新生成 —— 这条破了存档就废了
+	_check("同种子生成同一张图",
+			RunMap.generate(123).describe() == RunMap.generate(123).describe())
+	# 不同种子要真的能生成不同的图（如果 rng 没接对，所有种子会出一样的图）
+	var base := RunMap.generate(0).describe()
+	var found_diff := false
+	for seed_v in range(1, 20):
+		if RunMap.generate(seed_v).describe() != base:
+			found_diff = true
+			break
+	_check("不同种子能生成不同的图", found_diff)
+
+
+func _test_run_map_guarantees() -> void:
+	_begin("局地图：兜底保证")
+	var shop_count_ok := true
+	var shop_pos_ok := true
+	var first_step_ok := true
+	var pool_ok := true
+	for seed_v in 80:
+		var m := RunMap.generate(seed_v)
+		if m.shop_count() != RunMap.SHOP_COUNT:
+			shop_count_ok = false
+		# 商店不许出现在前两步（开局没钱，进店就是浪费一步）
+		for i in RunMap.SHOP_EARLIEST:
+			for r in m.steps[i]:
+				if (r as RunMap.Room).type == RunMap.RoomType.SHOP:
+					shop_pos_ok = false
+		# 第 1 步至少有一个"实物"奖励（宝石/装备/辅助），不能全是金币+升级
+		var has_item := false
+		for r in m.steps[0]:
+			var room := r as RunMap.Room
+			if room.reward in [RunMap.RewardKind.GEM, RunMap.RewardKind.EQUIP, RunMap.RewardKind.SUPPORT]:
+				has_item = true
+		if not has_item:
+			first_step_ok = false
+		# 全图至少各出现一次：辅助 / 装备 / 技能宝石（断粮检查）
+		for need in [RunMap.RewardKind.SUPPORT, RunMap.RewardKind.EQUIP, RunMap.RewardKind.GEM]:
+			if not m._has_reward(need):
+				pool_ok = false
+	_check("每张图恰好 %d 个商店（80 个种子）" % RunMap.SHOP_COUNT, shop_count_ok)
+	_check("商店不出现在前 %d 步" % RunMap.SHOP_EARLIEST, shop_pos_ok)
+	_check("第 1 步必有实物奖励", first_step_ok)
+	_check("全图必出现辅助/装备/技能宝石各至少一次", pool_ok)
+
+
+func _test_run_state_flow() -> void:
+	_begin("局状态机：阶段流转")
+	var s := RunState.start(7)
+	_check("开局在选房阶段", s.phase == RunState.Phase.CHOOSE)
+	_check("越界的房间进不去", not s.enter_room(99))
+
+	var step_before := s.step
+	s.advance()
+	_check("选房阶段不许直接跳步", s.step == step_before)
+
+	_check("能进第 0 个房间", s.enter_room(0))
+	_check("已经在房间里就不能再进别的房", not s.enter_room(0))
+	s.complete_combat()
+	_check("打赢普通战斗进入奖励阶段", s.phase == RunState.Phase.REWARD)
+	s.advance()
+	_check("领完奖走到第 2 步、回到选房", s.step == 1 and s.phase == RunState.Phase.CHOOSE)
+
+	# 一路走到这一层的 Boss（商店房从 ROOM 直接 advance，战斗房走完整流程）
+	while s.step < RunMap.STEPS - 1 and not s.is_over():
+		s.enter_room(0)
+		if s.current_room().type == RunMap.RoomType.SHOP:
+			s.advance()
+		else:
+			s.complete_combat()
+			s.advance()
+	_check("走到这一层最后一步", s.step == RunMap.STEPS - 1)
+	s.enter_room(0)
+	_check("最后一步进的是 Boss 房", s.current_room().type == RunMap.RoomType.BOSS)
+	_check("第 1 层的 Boss 不是最终 Boss", not s.current_room().is_final_boss)
+	var floor1_map := s.map.describe()
+	s.complete_combat()
+	_check("★ 守关 Boss 打赢 → 进奖励阶段，不是整局结束 ★",
+			not s.is_over() and s.phase == RunState.Phase.REWARD)
+	s.advance()
+	_check("★ 领完奖 → 上到第 2 层，步数归零、回到选房 ★",
+			s.floor_index == 1 and s.step == 0 and s.phase == RunState.Phase.CHOOSE,
+			"floor=%d step=%d phase=%d" % [s.floor_index, s.step, s.phase])
+	_check("第 2 层是一张新图", s.map.describe() != floor1_map)
+	_check("第 2 层的图也是完整的 %d 步" % RunMap.STEPS, s.map.steps.size() == RunMap.STEPS)
+
+	# 快进打穿全部 4 层 → 最后一层的 Boss 才是最终 Boss，打赢整局胜利
+	var guard := 0
+	while not s.is_over() and guard < 200:
+		guard += 1
+		s.enter_room(0)
+		var room := s.current_room()
+		if room.type == RunMap.RoomType.SHOP:
+			s.advance()
+			continue
+		if room.type == RunMap.RoomType.BOSS and s.is_final_floor():
+			_check("第 %d 层的 Boss 标着最终 Boss" % RunMap.FLOORS, room.is_final_boss)
+		s.complete_combat()
+		if not s.is_over():
+			s.advance()
+	_check("★ 打穿 %d 层 → 整局胜利结束 ★" % RunMap.FLOORS, s.is_over() and s.victory)
+	_check("结束时正好在最后一层", s.floor_index == RunMap.FLOORS - 1,
+			"实际 floor=%d" % s.floor_index)
+
+	var dead := RunState.start(8)
+	dead.fail()
+	_check("阵亡 = 结束且不是胜利", dead.is_over() and not dead.victory)
+
+
+func _test_run_state_gold_and_save() -> void:
+	_begin("局状态机：金币与序列化")
+	var s := RunState.start(99)
+	s.add_gold(30)
+	_check("加金币", s.gold == 30)
+	_check("不够花就拒绝、一分不扣", not s.spend_gold(31) and s.gold == 30)
+	_check("负数金额拒绝", not s.spend_gold(-5) and s.gold == 30)
+	_check("够花就扣", s.spend_gold(30) and s.gold == 0)
+
+	s.add_gold(12)
+	s.step = 3
+	var back := RunState.from_data(s.to_data())
+	_check("序列化往返：种子/步数/金币都在", back != null
+			and back.seed_value == 99 and back.step == 3 and back.gold == 12)
+	_check("读档一律回到这一步的选房阶段", back.phase == RunState.Phase.CHOOSE)
+	_check("★ 读档后的图和原图一模一样 ★（只存种子，图靠重新生成）",
+			back.map.describe() == s.map.describe())
+	_check("坏存档返回 null 而不是炸", RunState.from_data({}) == null)
+
+	# ---- 层也要序列化：打到第 3 层存档，读回来还在第 3 层、图也一样 ----
+	var deep := RunState.start(77)
+	deep._enter_floor(2)
+	deep.step = 4
+	deep.add_gold(50)
+	var deep_back := RunState.from_data(deep.to_data())
+	_check("★ 层数记住了 ★", deep_back != null and deep_back.floor_index == 2,
+			"实际 floor=%d" % (deep_back.floor_index if deep_back != null else -1))
+	_check("第 3 层的图读档后一模一样", deep_back.map.describe() == deep.map.describe())
+	_check("步数/金币也在", deep_back.step == 4 and deep_back.gold == 50)
+	# 老存档没有 floor 字段 → 当第 1 层，别炸
+	var legacy := RunState.from_data({"seed": 5, "step": 2, "gold": 9})
+	_check("没有 floor 字段的旧存档 → 回到第 1 层", legacy != null and legacy.floor_index == 0)
+
+	# ---- 同一局不同层 / 不同步的 rng_for 要互不相同（层种子破了会整局刷同一批奖励）----
+	var r_a := RunState.start(31)
+	var g1 := r_a.rng_for("reward").randi()
+	r_a._enter_floor(1)
+	var g2 := r_a.rng_for("reward").randi()
+	_check("同一步、不同层的奖励掷骰不同", g1 != g2)
+
+
+func _test_run_rewards_roll() -> void:
+	_begin("奖励三选一：掷骰规则")
+	var pools := {
+		"gems": Gems.all_actives(),
+		"supports": Gems.all_supports(),
+		"equips": EquipLibrary.all_items(),
+		"owned": [],
+	}
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 5
+	var opts := RunRewards.roll_options(RunMap.RewardKind.SUPPORT, rng, pools)
+	_check("辅助奖励给满 3 个候选", opts.size() == 3)
+	var ids := {}
+	for o in opts:
+		ids[o["item"].id] = true
+	_check("三个候选互不重复", ids.size() == 3)
+
+	# 同一个种子重掷 → 必须同一批候选（读档不能刷奖励）
+	var rng2 := RandomNumberGenerator.new()
+	rng2.seed = 5
+	var opts2 := RunRewards.roll_options(RunMap.RewardKind.SUPPORT, rng2, pools)
+	var same := opts.size() == opts2.size()
+	for i in opts.size():
+		if same and opts[i]["item"].id != opts2[i]["item"].id:
+			same = false
+	_check("★ 同种子掷出同一批候选 ★", same)
+
+	# ★ 金币不再是三选一奖励 ★（清房自动进账，见 _test_room_gold）
+	# 传一个不存在的 kind 要拿到空列表而不是炸
+	var grng := RandomNumberGenerator.new()
+	grng.seed = 1
+	_check("未知奖励类型返回空列表（不炸）",
+			RunRewards.roll_options(999, grng, pools).is_empty())
+
+	# 升级：候选来自"背包里已有的宝石"，而且满级的不许出现
+	var spark := Gems.gem_spark()
+	var maxed := Gems.gem_fireball()
+	maxed.level = maxed.max_level
+	var urng := RandomNumberGenerator.new()
+	urng.seed = 2
+	var up := RunRewards.roll_options(RunMap.RewardKind.UPGRADE, urng,
+			{"owned": [spark, maxed]})
+	_check("升级奖励只列出没满级的宝石", up.size() == 1 and up[0]["gem"] == spark)
+	_check("升级选项标了目标等级", str(up[0]["label"]).contains("Lv%d" % (spark.level + 1)))
+
+
+func _test_run_content() -> void:
+	_begin("局内容：怪、Boss、商店")
+	var counts_ok := true
+	var prev := 0
+	for i in RunMap.STEPS - 1:
+		var n := RunContent.enemies_for_step(i)
+		if n < prev or n < 2:
+			counts_ok = false
+		prev = n
+	_check("每步怪数只增不减、至少 2 只", counts_ok)
+
+	var m0 := RunContent.make_room_monster(0)
+	var m5 := RunContent.make_room_monster(5)
+	_check("第 1 步的怪比基准怪弱（开局只有孤杖孤石）",
+			m0.max_life() < Demo.make_monster().max_life())
+	_check("第 6 步的怪比第 1 步硬", m5.max_life() > m0.max_life())
+	_check("怪身上真的叠了成长词缀", m0.gear_mods.size() > 0)
+
+	# ---- ★ 每层难度递增 ★ 同一步，层越深怪越硬；每层的 Boss 也一层比一层硬 ----
+	var f0 := RunContent.make_room_monster(3, 0)
+	var f1 := RunContent.make_room_monster(3, 1)
+	var f3 := RunContent.make_room_monster(3, 3)
+	_check("★ 同一步，第 2 层的怪比第 1 层硬 ★", f1.max_life() > f0.max_life(),
+			"%.0f → %.0f" % [f0.max_life(), f1.max_life()])
+	_check("第 4 层的怪更硬", f3.max_life() > f1.max_life())
+	var bosses: Array = []
+	for i in RunMap.FLOORS:
+		bosses.append(RunContent.make_boss(i))
+	var boss_grows := true
+	for i in RunMap.FLOORS - 1:
+		if (bosses[i + 1] as CombatEntity).max_life() <= (bosses[i] as CombatEntity).max_life():
+			boss_grows = false
+	_check("★ 每层的 Boss 血量逐层走高 ★", boss_grows,
+			"%.0f / %.0f / %.0f / %.0f" % [bosses[0].max_life(), bosses[1].max_life(),
+				bosses[2].max_life(), bosses[3].max_life()])
+	_check("每层 Boss 名字各不相同（守关 Boss 不冒充骸骨领主）",
+			bosses[0].display_name != bosses[3].display_name
+			and bosses[3].display_name == "骸骨领主")
+	_check("第 1 层的守关 Boss 也比同层最硬的怪硬",
+			(bosses[0] as CombatEntity).max_life() > RunContent.make_room_monster(5, 0).max_life())
+
+	var boss := RunContent.make_boss()
+	_check("不传层数 = 最终 Boss（满血 9000）", is_equal_approx(boss.max_life(), 9000.0),
+			"实际 %.0f" % boss.max_life())
+	_check("Boss 血量远超最硬的普通怪", boss.max_life() > m5.max_life() * 2.0)
+	_check("★ Boss 攻速是 set_base 的 ★（怪没设过基础攻速，词缀提高 0 还是 0）",
+			boss.get_stat(S.ATTACK_SPEED) >= 0.4)
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 3
+	var stock := RunContent.shop_stock(rng)
+	_check("商店进货 %d 件" % (RunContent.SHOP_ACTIVES + RunContent.SHOP_SUPPORTS + RunContent.SHOP_EQUIPS),
+			stock.size() == RunContent.SHOP_ACTIVES + RunContent.SHOP_SUPPORTS + RunContent.SHOP_EQUIPS)
+	var priced := true
+	for thing in stock:
+		if RunContent.price_of(thing) <= 0:
+			priced = false
+	_check("货架上每件都有正数价格", priced)
+
+	var rng2 := RandomNumberGenerator.new()
+	rng2.seed = 3
+	var stock2 := RunContent.shop_stock(rng2)
+	var same := stock.size() == stock2.size()
+	for i in stock.size():
+		if same and stock[i].id != stock2[i].id:
+			same = false
+	_check("同种子进同一批货（防刷货架）", same)
+
+
+func _test_room_gold() -> void:
+	_begin("清房金币：自动进账、种子定死、随步数走高")
+
+	# ★ 同一局同一步两次要钱 → 同一笔 ★（World 就是这么调的；rng_for 破了这条就能读档刷钱）
+	var s := RunState.start(42)
+	var a := RunContent.room_gold(s.step, s.rng_for("room_gold"))
+	var b := RunContent.room_gold(s.step, s.rng_for("room_gold"))
+	_check("同一局同一步的数额是定死的", a == b, "两次分别 %d / %d" % [a, b])
+	_check("第 1 步在 %d~%d 之间" % [RunContent.ROOM_GOLD_MIN, RunContent.ROOM_GOLD_MAX],
+			a >= RunContent.ROOM_GOLD_MIN and a <= RunContent.ROOM_GOLD_MAX, "实际 %d" % a)
+
+	# 同一个基础掷骰下，第 6 步比第 1 步多整整 5 × ROOM_GOLD_PER_STEP
+	var r1 := RandomNumberGenerator.new()
+	r1.seed = 7
+	var r2 := RandomNumberGenerator.new()
+	r2.seed = 7
+	_check("每往后一步 +%d" % RunContent.ROOM_GOLD_PER_STEP,
+			RunContent.room_gold(5, r1) == RunContent.room_gold(0, r2) + 5 * RunContent.ROOM_GOLD_PER_STEP)
+
+	# ★ 层也算：同一步，每深一层 +ROOM_GOLD_PER_FLOOR ★（深层怪更硬，钱也得跟上）
+	var r3 := RandomNumberGenerator.new()
+	r3.seed = 7
+	var r4 := RandomNumberGenerator.new()
+	r4.seed = 7
+	_check("每深一层 +%d" % RunContent.ROOM_GOLD_PER_FLOOR,
+			RunContent.room_gold(0, r3, 3) == RunContent.room_gold(0, r4, 0)
+			+ 3 * RunContent.ROOM_GOLD_PER_FLOOR)
+
+	# ★ 守关 Boss 也是一个关卡，同样掉金币，而且比普通房肥 ★
+	var rb := RandomNumberGenerator.new()
+	rb.seed = 9
+	var bg := RunContent.boss_gold(0, rb)
+	_check("Boss 金币在 %d~%d 之间" % [RunContent.BOSS_GOLD_MIN, RunContent.BOSS_GOLD_MAX],
+			bg >= RunContent.BOSS_GOLD_MIN and bg <= RunContent.BOSS_GOLD_MAX, "实际 %d" % bg)
+	var rb1 := RandomNumberGenerator.new()
+	rb1.seed = 9
+	var rb2 := RandomNumberGenerator.new()
+	rb2.seed = 9
+	_check("Boss 金币每深一层 +%d" % RunContent.BOSS_GOLD_PER_FLOOR,
+			RunContent.boss_gold(2, rb1) == RunContent.boss_gold(0, rb2)
+			+ 2 * RunContent.BOSS_GOLD_PER_FLOOR)
+	_check("Boss 的一笔比同层普通房的上限还肥",
+			RunContent.BOSS_GOLD_MIN > RunContent.ROOM_GOLD_MAX)
+
+	# ★ 地图上不再有金币房 ★ 扫一批种子，任何战斗房的外显都不该是金币
+	var no_gold_room := true
+	var names_ok := true
+	for seed_v in 60:
+		for row in RunMap.generate(seed_v).steps:
+			for r in row:
+				var room := r as RunMap.Room
+				if room.label().contains("金币"):
+					no_gold_room = false
+				if room.type == RunMap.RoomType.COMBAT and RunMap.reward_name(room.reward) == "?":
+					names_ok = false
+	_check("60 个种子扫下来，没有一个金币房", no_gold_room)
+	_check("每个战斗房的奖励都是认识的 4 种之一", names_ok)
+
+
+# ================================================================ 内容扩充（电弧 / 冰系）
+
+func _test_new_actives() -> void:
+	_begin("新技能：电弧 / 寒冰弹 / 冰霜脉冲")
+	var ids := {}
+	for g in Gems.all_actives():
+		ids[(g as SkillGem).id] = true
+	_check("图鉴里有全部 5 颗主动技能石",
+			ids.size() == 5 and ids.has(&"arc") and ids.has(&"frostbolt")
+			and ids.has(&"freezing_pulse"),
+			"实际 %d 颗" % ids.size())
+	_check("按 id 能造出电弧（存档读回来靠它）", Gems.make_gem(&"arc") != null)
+
+	var p := CombatEntity.new(&"t", "测试")
+
+	# 电弧：弹射专精。弹射是它唯一的打群方式，穿透和分叉都不该有
+	var arc := Gems.gem_arc().build()
+	_check("电弧带闪电/法术/投射物标签",
+			T.has_all(arc.tags, T.LIGHTNING | T.SPELL | T.PROJECTILE))
+	var arc_spec := ProjectileSpec.build(p, arc)
+	_check("电弧天生弹射 3 次", arc_spec.chain_count == 3, "实际 %d" % arc_spec.chain_count)
+	_check("电弧不穿透、不分叉", arc_spec.pierce_count == 0 and arc_spec.fork_count == 0)
+	var arc_shocks := false
+	for b in arc.on_hit_buffs:
+		if (b as BuffDef).id == &"shock":
+			arc_shocks = true
+	_check("电弧命中附加感电", arc_shocks)
+
+	# 寒冰弹：慢速穿透弹
+	var fb := Gems.gem_frostbolt().build()
+	var fb_spec := ProjectileSpec.build(p, fb)
+	_check("寒冰弹是冰霜法术投射物", T.has_all(fb.tags, T.COLD | T.SPELL | T.PROJECTILE))
+	_check("寒冰弹天生穿透 2 次", fb_spec.pierce_count == 2, "实际 %d" % fb_spec.pierce_count)
+	_check("寒冰弹飞得比火球慢（弹幕感的来源）",
+			fb_spec.speed < Gems.gem_fireball().build().projectile_speed,
+			"寒冰弹 %.0f" % fb_spec.speed)
+
+	# 冰霜脉冲：快而短命 = 短射程，穿透一切
+	var pulse := Gems.gem_freezing_pulse().build()
+	var pu := ProjectileSpec.build(p, pulse)
+	_check("冰霜脉冲穿透给到用不完", pu.pierce_count >= 90, "实际 %d" % pu.pierce_count)
+	var range_px := pu.speed * pu.duration
+	_check("冰霜脉冲射程是短的（速度×存活 < 200 像素）", range_px < 200.0,
+			"实际 %.0f 像素" % range_px)
+
+	var chills := 0
+	for sp in [fb, pulse]:
+		for b in (sp as SkillSpec).on_hit_buffs:
+			if (b as BuffDef).id == &"chill":
+				chills += 1
+	_check("两个冰技能命中都附加冰缓", chills == 2, "实际 %d 个" % chills)
+
+
+func _test_chill_buff() -> void:
+	_begin("冰缓：移动速度 -30%，REFRESH 不叠层")
+	var m := CombatEntity.new(&"mob", "怪")
+	m.set_base(S.MOVE_SPEED, 100.0)
+	m.apply_buff(Demo.buff_chill())
+	_close("上了冰缓 → 移速 70", m.get_stat(S.MOVE_SPEED), 70.0)
+	m.apply_buff(Demo.buff_chill())
+	_close("★ 再上一次不叠层，还是 70 ★", m.get_stat(S.MOVE_SPEED), 70.0)
+
+	# ★ Enemy 的追击速度就是这么算的 ★ 怪没设过基础移速，基础值从参数传进来
+	var e := CombatEntity.new(&"mob2", "怪2")
+	e.apply_buff(Demo.buff_chill())
+	_close("基础值走参数传入也生效（Enemy 传 CHASE_SPEED）",
+			e.get_stat(S.MOVE_SPEED, T.NONE, 42.0), 42.0 * 0.70)
+
+	# 到时间要消退，不能永久减速
+	e.tick_buffs(3.0)
+	_close("2.5 秒后冰缓消退，移速回满", e.get_stat(S.MOVE_SPEED, T.NONE, 42.0), 42.0)
+
+
+func _test_cold_support() -> void:
+	_begin("冰霜增强：连接规则 + 独立的「更多」乘区")
+	var sup := Gems.support_cold()
+	_check("能连寒冰弹", sup.can_support(Gems.gem_frostbolt().tags))
+	_check("能连冰霜脉冲", sup.can_support(Gems.gem_freezing_pulse().tags))
+	_check("连不上电球术（不是冰技能）", not sup.can_support(Gems.gem_spark().tags))
+	_check("连不上火球术", not sup.can_support(Gems.gem_fireball().tags))
+
+	var p := CombatEntity.new(&"t", "测试")
+	p.skill_mods.add_all(sup.build_mods())
+	_close("冰霜伤害 ×1.25", p.get_stat(S.DAMAGE, Gems.gem_frostbolt().build().hit_tags(), 100.0), 125.0)
+	_close("闪电伤害不受影响", p.get_stat(S.DAMAGE, Gems.gem_spark().build().hit_tags(), 100.0), 100.0)
+
+	# 相邻内容的连接规则顺手验一遍
+	_check("闪电增强能连电弧", Gems.support_lightning().can_support(Gems.gem_arc().tags))
+	_check("★ 延长持续连不上冰霜脉冲 ★（它没有【持续时间】标签，短射程是它的身份）",
+			not Gems.support_duration().can_support(Gems.gem_freezing_pulse().tags))
+	_check("弹射支援能连电弧（弹射次数还能再叠）",
+			Gems.support_chain().can_support(Gems.gem_arc().tags))
+
+
+func _test_new_content_in_run() -> void:
+	_begin("新内容进了价目表和奖励池")
+	_check("三颗新技能石都写进了价目表（不是吃默认价）",
+			RunContent.PRICES.has(&"arc") and RunContent.PRICES.has(&"frostbolt")
+			and RunContent.PRICES.has(&"freezing_pulse"))
+	_check("见习法杖也在价目表里（商店里买第二根法杖 = 多带一个技能）",
+			RunContent.PRICES.has(&"apprentice_wand"))
+	var pools := RunContent.reward_pools([])
+	_check("奖励池：主动 5 颗、辅助 21 颗（15 普通 + 6 触媒）",
+			(pools["gems"] as Array).size() == 5 and (pools["supports"] as Array).size() == 21,
+			"主动 %d / 辅助 %d" % [(pools["gems"] as Array).size(), (pools["supports"] as Array).size()])
+
+
+# ================================================================ 合成
+
+func _test_gem_merge() -> void:
+	_begin("合成：同款宝石叠放升级")
+	var g := GemGrid.new()
+	var a := Gems.gem_spark()
+	a.level = 2
+	var target := g.place(a, Vector2i(2, 2), 0)
+	var b := Gems.gem_spark()
+	b.level = 3
+
+	_check("同 id 能找到合成目标", g.merge_target(b, Vector2i(2, 2)) == target)
+	_check("不同 id 合不了", g.merge_target(Gems.gem_fireball(), Vector2i(2, 2)) == null)
+	_check("空格子没有合成目标", g.merge_target(b, Vector2i(5, 5)) == null)
+
+	g.merge(b, target)
+	_check("★ 合成 = max(2, 3) + 1 = 4 级 ★（取 max 不相加，堆 1 级宝石刷不了级）",
+			a.level == 4, "实际 %d 级" % a.level)
+	_check("网格里还是只有一颗", g.items.size() == 1)
+
+	# ★ 辅助宝石没有等级 → 不参与合成（ADR-024）★
+	# 重复的辅助不是废件：拿去给另一根法杖配同款连线
+	var s1 := Gems.support_chain()
+	var sp := g.place(s1, Vector2i(4, 4), 0)
+	var s2 := Gems.support_chain()
+	_check("★ 辅助宝石合不了 ★", g.merge_target(s2, Vector2i(4, 4)) == null)
+	_check("也不报「满级」——走普通放置判定（那里已经有东西了）",
+			g.merge_reject_reason(s2, Vector2i(4, 4)) == "")
+	_check("辅助还好好待在原地", g.at(Vector2i(4, 4)) == sp)
+
+	# 等级封顶：4 级吃一颗低级的 → 5，不会溢出上限
+	a.level = a.max_level - 1
+	g.merge(Gems.gem_spark(), target)
+	_check("合成不会超过等级上限（5 级封顶）", a.level == a.max_level, "实际 %d 级" % a.level)
+
+	# 满级之后合不了，而且要说得清原因（不能报"那里已经有东西了"）
+	_check("满级合不了", g.merge_target(b, Vector2i(2, 2)) == null)
+	_check("拒绝原因写明满级", g.merge_reject_reason(b, Vector2i(2, 2)).contains("满级"),
+			g.merge_reject_reason(b, Vector2i(2, 2)))
+	_check("不同 id 不给合成原因（走普通放置判定）",
+			g.merge_reject_reason(Gems.gem_fireball(), Vector2i(2, 2)) == "")
+
+	# 装备不参与合成：max_level = 1，没有"升级"可言
+	g.place(EquipLibrary.iron_helm(), Vector2i(0, 0), 0)
+	_check("装备不能当合成目标", g.merge_target(EquipLibrary.iron_helm(), Vector2i(0, 0)) == null)
+	_check("装备也不给合成原因", g.merge_reject_reason(EquipLibrary.iron_helm(), Vector2i(0, 0)) == "")
+
+
+# ================================================================ 法杖载体（ADR-020）
+
+func _test_wand_socket() -> void:
+	_begin("★ 法杖：技能的载体（镶嵌 / 合成 / 交换）★")
+
+	# 图鉴：法杖有槽，其它装备没有
+	_check("见习法杖有 1 个槽", EquipLibrary.apprentice_wand().socket_count == 1)
+	_check("橡木法杖有 1 个槽", EquipLibrary.staff().socket_count == 1)
+	_check("头盔/靴子/戒指没有槽",
+			not EquipLibrary.iron_helm().has_socket()
+			and not EquipLibrary.traveller_boots().has_socket()
+			and not EquipLibrary.ring_of_flame().has_socket())
+	_check("★ 见习法杖没有任何词缀 ★（它的全部价值就是那个槽；也保证不影响基准角色数值）",
+			EquipLibrary.apprentice_wand().mods.is_empty())
+
+	var g := GemGrid.new()
+	var wp := g.place(EquipLibrary.apprentice_wand(), Vector2i(3, 2), 0)  # (3,2)(3,3)
+
+	# ---- 镶入空槽 ----
+	var spark := Gems.gem_spark()
+	spark.level = 2
+	_check("点在法杖的任意一格都构成镶嵌", g.socket_target(spark, Vector2i(3, 3)) == wp)
+	_check("点在空地不构成镶嵌", g.socket_target(spark, Vector2i(0, 0)) == null)
+	_check("手上是辅助宝石不构成镶嵌", g.socket_target(Gems.support_multi(), Vector2i(3, 2)) == null)
+	_check("手上是装备不构成镶嵌", g.socket_target(EquipLibrary.iron_helm(), Vector2i(3, 2)) == null)
+	_check("空槽镶得进（没有拒绝原因）", g.socket_reject_reason(spark, Vector2i(3, 2)) == "")
+	var out = g.socket(spark, wp)
+	_check("★ 镶入空槽 → 手上的被吃掉（返回 null）★", out == null)
+	_check("槽里现在是它", wp.skill_gem() == spark)
+	_check("★ 镶了宝石的法杖出现在可施放列表 ★", g.skill_items().size() == 1)
+	_check("宝石不占网格格子（网格里只有法杖一件）", g.items.size() == 1)
+
+	# ---- 槽里同款 = 合成升级（规则同网格叠放：max 两边 +1）----
+	var spark2 := Gems.gem_spark()
+	spark2.level = 3
+	out = g.socket(spark2, wp)
+	_check("★ 同款镶入 = 合成，max(2,3)+1 = 4 级 ★", out == null and spark.level == 4,
+			"实际 %d 级" % spark.level)
+
+	# ---- 槽里别的宝石 = 交换 ----
+	var fireball := Gems.gem_fireball()
+	out = g.socket(fireball, wp)
+	_check("★ 异款镶入 = 交换，旧宝石回到手上 ★", out == spark)
+	_check("槽里换成了火球术", wp.skill_gem() == fireball)
+
+	# ---- 满级同款拒绝，且说得清原因 ----
+	fireball.level = fireball.max_level
+	var maxed := Gems.gem_fireball()
+	_check("槽里同款已满级 → 拒绝并写明原因",
+			g.socket_reject_reason(maxed, Vector2i(3, 2)).contains("满级"),
+			g.socket_reject_reason(maxed, Vector2i(3, 2)))
+
+	# ---- owned_gems：槽里的宝石也算"拥有"（升级奖励要能升到它）----
+	g.place(Gems.gem_arc(), Vector2i(0, 0), 0)   # 一颗裸宝石库存
+	var owned := g.owned_gems()
+	_check("owned_gems = 槽里的 + 裸放的，共 2 颗", owned.size() == 2, "实际 %d" % owned.size())
+	_check("包含槽里的火球术", owned.has(fireball))
+
+	# ---- 拿起法杖 = 宝石跟着走 ----
+	var picked := g.remove_at(Vector2i(3, 3))
+	_check("按法杖的任意一格整件拿走", picked == wp)
+	_check("★ 槽里的宝石跟着法杖一起走 ★", (picked.gem as EquipItem).socketed == fireball)
+
+
+## ★ ADR-023：法杖的词缀只对槽里镶着的技能生效，不再全局 ★
+func _test_wand_mods_scope() -> void:
+	_begin("★ 法杖词缀的作用域：只增幅槽里的技能 ★")
+	var g := GemGrid.new()
+	var staff := EquipLibrary.staff()            # 更多30%法术 + 提高25%施法速度
+	staff.socketed = Gems.gem_spark()
+	var wp := g.place(staff, Vector2i(0, 0), 0)
+	var wand2 := EquipLibrary.apprentice_wand()  # 零词缀
+	wand2.socketed = Gems.gem_fireball()
+	var wp2 := g.place(wand2, Vector2i(3, 0), 0)
+	g.place(EquipLibrary.ring_of_flame(), Vector2i(6, 0), 0)
+
+	# ① equip_mods 这层不再包含法杖的词缀；普通装备照旧
+	var srcs := {}
+	for m in g.equip_mods():
+		srcs[(m as Modifier).source] = true
+	_check("★ equip_mods 里没有法杖的词缀 ★", not srcs.has(&"staff"), str(srcs.keys()))
+	_check("戒指还在 equip_mods 里（普通装备放着就生效）", srcs.has(&"ring_of_flame"))
+
+	# ② 法杖的词缀跟着 link 走（= Player.rebuild 塞进 skill_mods 的那份）
+	var p := CombatEntity.new(&"t", "测试")
+	p.equip_mods.add_all(g.equip_mods())
+	p.skill_mods.add_all(g.link_for(wp).mods())
+	var spark_tags := g.link_for(wp).skill().hit_tags()
+	_close("★ 用橡木法杖里的电球术：吃到 更多30%法术 ★",
+			p.get_stat(S.DAMAGE, spark_tags, 100.0), 130.0)
+	_close("施法速度也吃到 +25%", p.get_stat(S.CAST_SPEED, T.NONE, 1.0), 1.25)
+
+	# ③ Q 切到另一根法杖（skill_mods 整层重建）→ 橡木法杖的词缀跟着消失
+	p.skill_mods.clear()
+	p.skill_mods.add_all(g.link_for(wp2).mods())
+	var fb_tags := g.link_for(wp2).skill().hit_tags()
+	# 火球是火焰法术：戒指照吃（equip 层：+15 点、提高120% → (100+15)×2.2），
+	# 但橡木法杖的 更多30% 不再乘进来
+	_close("★ 换法杖后橡木法杖的词缀不再生效 ★",
+			p.get_stat(S.DAMAGE, fb_tags, 100.0), (100.0 + 15.0) * 2.20)
+	_close("施法速度回到 1.0（见习法杖零词缀）", p.get_stat(S.CAST_SPEED, T.NONE, 1.0), 1.0)
+
+	# ④ 空槽的法杖：词缀没有作用对象，哪一层都不进
+	var g2 := GemGrid.new()
+	var empty := g2.place(EquipLibrary.staff(), Vector2i(0, 0), 0)
+	_check("空法杖的词缀哪层都不进",
+			g2.equip_mods().is_empty() and g2.link_for(empty).mods().is_empty())
+
+
+# ================================================================ 4 层结构（ADR-021）
+
+func _test_run_map_floors() -> void:
+	_begin("★ 4 层结构：每层一张图，守关 Boss 带奖励 ★")
+	_check("一局共 %d 层" % RunMap.FLOORS, RunMap.FLOORS == 4)
+
+	# 前三层的 Boss 是守关 Boss（带奖励外显），最后一层才是最终 Boss
+	for f in RunMap.FLOORS:
+		var m := RunMap.generate(1234, f)
+		var boss_room: RunMap.Room = m.steps[RunMap.STEPS - 1][0]
+		if f < RunMap.FLOORS - 1:
+			_check("第 %d 层的 Boss 是守关 Boss、标了奖励" % (f + 1),
+					not boss_room.is_final_boss
+					and boss_room.label().contains("奖励"), boss_room.label())
+		else:
+			_check("第 %d 层的 Boss 是最终 Boss" % (f + 1),
+					boss_room.is_final_boss and boss_room.label().contains("最终"))
+
+	# 守关 Boss 的奖励类型是种子定死的（读档不能换奖励）
+	var a: RunMap.Room = RunMap.generate(88, 0).steps[RunMap.STEPS - 1][0]
+	var b: RunMap.Room = RunMap.generate(88, 0).steps[RunMap.STEPS - 1][0]
+	_check("同种子的 Boss 奖励一样", a.reward == b.reward)
+
+	# 一局 4 层的图各不相同（层种子从局种子推导，但互不重复）
+	var s := RunState.start(555)
+	var seen := {}
+	for f in RunMap.FLOORS:
+		seen[s.map.describe()] = true
+		if f < RunMap.FLOORS - 1:
+			s._enter_floor(f + 1)
+	_check("★ 4 层是 4 张不同的图 ★", seen.size() == RunMap.FLOORS,
+			"只有 %d 张不同" % seen.size())
+
+
+# ================================================================ 回蓝装备
+
+## 魔力回复走属性系统（S.MANA_REGEN）：基础值由 Player 传入（12/秒），
+## 装备上的 FLAT 和 INCREASED 在这上面按四段式加成 —— 和怪物追击速度是同一套做法。
+func _test_mana_regen_gear() -> void:
+	_begin("回蓝装备：魔力回复走属性系统")
+	var e := CombatEntity.new(&"t", "测试")
+	_close("没有装备时就是基础值 12/秒", e.get_stat(S.MANA_REGEN, T.NONE, 12.0), 12.0)
+
+	e.equip_mods.add_all(EquipLibrary.arcane_belt().build_mods())
+	_close("秘法腰带 +8/秒 → 20", e.get_stat(S.MANA_REGEN, T.NONE, 12.0), 20.0)
+	_close("腰带还给 60 魔力上限", e.get_stat(S.MAX_MANA, T.NONE, 200.0), 260.0)
+
+	e.equip_mods.add_all(EquipLibrary.sapphire_amulet().build_mods())
+	_close("★ 蓝玉护符再提高 50% → (12+8)×1.5 = 30 ★（FLAT 和 INCREASED 是不同乘区）",
+			e.get_stat(S.MANA_REGEN, T.NONE, 12.0), 30.0)
+
+	e.equip_mods.remove_by_source(&"arcane_belt")
+	_close("脱下腰带 → 12×1.5 = 18", e.get_stat(S.MANA_REGEN, T.NONE, 12.0), 18.0)
+
+	_check("腰带是 3×1 的横条（任务板要的形状）",
+			EquipLibrary.arcane_belt().width == 3 and EquipLibrary.arcane_belt().height == 1)
+	_check("护符只占 1 格", EquipLibrary.sapphire_amulet().width == 1
+			and EquipLibrary.sapphire_amulet().height == 1)
+	_check("两件都进了价目表", RunContent.PRICES.has(&"arcane_belt")
+			and RunContent.PRICES.has(&"sapphire_amulet"))
+	_check("两件都不带镶嵌槽（法杖才是技能载体）",
+			not EquipLibrary.arcane_belt().has_socket()
+			and not EquipLibrary.sapphire_amulet().has_socket())
+
+
+# ================================================================ 触媒（ADR-026）
+
+func _test_catalyst_rules() -> void:
+	_begin("★ 触媒：条件计数 / 门槛封顶 / 连接规则 ★")
+
+	# ---- 图鉴：6 颗触媒，种类和门槛按需求配 ----
+	var cats := Gems.all_catalysts()
+	_check("图鉴里有 6 颗触媒", cats.size() == 6, "实际 %d" % cats.size())
+	var want := {
+		&"cat_shock":  [CatalystGem.Trigger.SHOCK_APPLIED, 3.0],
+		&"cat_ignite": [CatalystGem.Trigger.IGNITE_APPLIED, 3.0],
+		&"cat_chill":  [CatalystGem.Trigger.CHILL_APPLIED, 1.0],
+		&"cat_hits":   [CatalystGem.Trigger.HITS, 5.0],
+		&"cat_move":   [CatalystGem.Trigger.MOVE_DISTANCE, 20.0 * CatalystGem.PIXELS_PER_TILE],
+		&"cat_timer":  [CatalystGem.Trigger.INTERVAL, 5.0],
+	}
+	for c in cats:
+		var cat := c as CatalystGem
+		var spec: Array = want.get(cat.id, [])
+		_check("%s 的条件和门槛正确" % cat.display_name,
+				not spec.is_empty() and cat.trigger_kind == int(spec[0])
+				and is_equal_approx(cat.threshold, float(spec[1])),
+				"kind=%d threshold=%.0f" % [cat.trigger_kind, cat.threshold])
+		_check("%s 是辅助宝石（能用箭头连线），且不带词缀、没有等级" % cat.display_name,
+				cat is SupportGem and cat.mods.is_empty() and cat.max_level == 1)
+		_check("%s 有正数价格" % cat.display_name, RunContent.price_of(cat) > 0)
+	_check("触媒也进了辅助池（all_supports）", Gems.all_supports().size() == 21)
+
+	# ---- 计数规则 ----
+	var hits := Gems.cat_hits()
+	hits.advance(CatalystGem.Trigger.HITS, 1.0)
+	hits.advance(CatalystGem.Trigger.SHOCK_APPLIED, 99.0)   # 别的事件不该计入
+	_check("只数自己关心的事件", is_equal_approx(hits.progress, 1.0),
+			"实际 %.1f" % hits.progress)
+	_check("没到门槛不触发", not hits.ready_to_fire())
+	for i in 10:
+		hits.advance(CatalystGem.Trigger.HITS, 1.0)
+	_check("到门槛了", hits.ready_to_fire())
+	_check("★ 进度封顶在门槛上（蓝不够时不许攒成连环触发）★",
+			is_equal_approx(hits.progress, hits.threshold), "实际 %.1f" % hits.progress)
+	hits.consume()
+	_check("触发成功后进度清零", is_zero_approx(hits.progress) and not hits.ready_to_fire())
+
+	# 冰冻触媒：门槛 1 次 —— 一发入魂
+	var chill := Gems.cat_chill()
+	chill.advance(CatalystGem.Trigger.CHILL_APPLIED, 1.0)
+	_check("冰冻触媒 1 次就到门槛", chill.ready_to_fire())
+
+	# 面板文字别炸、且说得清条件
+	for c in cats:
+		var cat := c as CatalystGem
+		_check("%s 的面板文本正常" % cat.display_name,
+				cat.tooltip().contains("触发条件") and cat.trigger_text().length() > 0)
+	_check("疾行触媒按「格」显示（不是像素）", Gems.cat_move().trigger_text().contains("20 格"))
+
+	# ---- 连接规则：和普通辅助一样，箭头指着法杖就算连上 ----
+	var g := GemGrid.new()
+	var wand := EquipLibrary.apprentice_wand()
+	wand.socketed = Gems.gem_fireball()
+	var wp := g.place(wand, Vector2i(3, 2), 0)
+	var cp := g.place(Gems.cat_timer(), Vector2i(2, 2), 0)   # 箭头 → 指进法杖
+	_check("触媒箭头指着法杖 → linked", g.arrow_state(cp) == "linked")
+	_check("触媒出现在 supports_for 里", g.supports_for(wp).size() == 1)
+	_check("触媒不贡献任何词缀", g.link_for(wp).mods().is_empty())
+	_close("★ 但它的魔力倍率照算 ★（火球 13 × 1.20）",
+			g.link_for(wp).skill().mana_cost, 13.0 * 1.20)
+
+	# 触媒指着裸宝石 / 空法杖 → 和普通辅助一样连不上
+	var g2 := GemGrid.new()
+	g2.place(Gems.gem_spark(), Vector2i(3, 2), 0)
+	var cp2 := g2.place(Gems.cat_timer(), Vector2i(2, 2), 0)
+	_check("触媒指着裸宝石 → idle（技能必须在法杖里）", g2.arrow_state(cp2) == "idle")
+
+	# ---- ★ 防循环标记：触发产物的状态机带 from_trigger，分叉出来的也继承 ★ ----
+	var tspec := ProjectileSpec.new()
+	tspec.fork_count = 1
+	var tst := ProjectileState.new(tspec)
+	_check("默认不是触发产物", not tst.from_trigger)
+	tst.from_trigger = true
+	var trng := RandomNumberGenerator.new()
+	trng.seed = 1
+	tst.decide_on_hit(1, trng)   # 消耗掉分叉，才能 clone_for_fork
+	_check("★ 分叉出来的子弹继承 from_trigger ★（触发产物的分叉也不喂触媒）",
+			tst.clone_for_fork().from_trigger)
+
+
+# ================================================================ 新辅助宝石
+
+func _test_new_supports() -> void:
+	_begin("★ 新辅助：法术节魔 / 元素集中 / 快速·缓速投射 / 暴击伤害 ★")
+	var melee_tags := T.PHYSICAL | T.ATTACK | T.MELEE
+
+	# ---- 法术节魔：唯一倍率 < 1 的辅助，纯省蓝 ----
+	var save := Gems.support_inspiration()
+	_check("★ 倍率小于 1（省蓝而不是加价）★", save.mana_multiplier < 1.0,
+			"×%.2f" % save.mana_multiplier)
+	_check("不给任何词缀（省下的蓝就是它的全部价值）", save.build_mods().is_empty())
+	_check("只连法术", save.can_support(Gems.gem_spark().tags)
+			and not save.can_support(melee_tags))
+	# 隔着法杖连上后，技能消耗真的降了；和别的辅助倍率照样连乘
+	var g := GemGrid.new()
+	var wand := EquipLibrary.apprentice_wand()
+	wand.socketed = Gems.gem_spark()
+	var wp := g.place(wand, Vector2i(3, 2), 0)
+	g.place(save, Vector2i(2, 2), 0)                       # 左 → 指杖头
+	_close("★ 电球术 6 蓝 × 0.65 = 3.9 ★", g.link_for(wp).skill().mana_cost, 6.0 * 0.65)
+	g.place(Gems.support_multi(), Vector2i(4, 2), 2)       # 右 ← 指杖头（×1.40）
+	_close("和「多重投射」连乘：6 × 0.65 × 1.40",
+			g.link_for(wp).skill().mana_cost, 6.0 * 0.65 * 1.40)
+
+	# ---- 元素集中：吃派生标签，三系元素都连得上、物理不行 ----
+	var focus := Gems.support_ele_focus()
+	_check("火焰技能连得上（火 → 元素是派生标签）", focus.can_support(Gems.gem_fireball().tags))
+	_check("冰霜技能连得上", focus.can_support(Gems.gem_frostbolt().tags))
+	_check("闪电技能连得上", focus.can_support(Gems.gem_spark().tags))
+	_check("★ 物理近战连不上 ★", not focus.can_support(melee_tags))
+	var p := CombatEntity.new(&"t", "测试")
+	p.skill_mods.add_all(focus.build_mods())
+	_close("火焰伤害 ×1.30", p.get_stat(S.DAMAGE, Gems.gem_fireball().build().hit_tags(), 100.0), 130.0)
+	_close("物理伤害不受影响", p.get_stat(S.DAMAGE, T.PHYSICAL | T.ATTACK, 100.0), 100.0)
+
+	# ---- 快速 / 缓速投射：一对反义词缀，作用在投射物速度上 ----
+	var p2 := CombatEntity.new(&"t2", "测试")
+	var base_speed := ProjectileSpec.build(p2, Gems.gem_fireball().build()).speed
+	p2.skill_mods.add_all(Gems.support_fast_proj().build_mods())
+	_close("★ 快速投射：速度 ×1.5 ★",
+			ProjectileSpec.build(p2, Gems.gem_fireball().build()).speed, base_speed * 1.5)
+	p2.skill_mods.clear()
+	p2.skill_mods.add_all(Gems.support_slow_proj().build_mods())
+	var slow := ProjectileSpec.build(p2, Gems.gem_fireball().build())
+	_close("★ 缓速投射：速度 ×0.7 ★", slow.speed, base_speed * 0.7)
+	_close("但伤害更多 20%（独立乘区）",
+			p2.get_stat(S.DAMAGE, Gems.gem_fireball().build().hit_tags(), 100.0), 120.0)
+
+	# ---- 暴击伤害：FLAT 加在暴伤倍率上，走完整伤害管线验 ----
+	var pc := Demo.make_player()
+	var mob := Demo.make_monster()
+	var fire_spec := Gems.gem_fireball().build()
+	var multi_before := DamagePipeline.compute_hit(pc, mob, fire_spec, null).crit_multi
+	pc.skill_mods.add_all(Gems.support_crit_damage().build_mods())
+	var multi_after := DamagePipeline.compute_hit(pc, mob, fire_spec, null).crit_multi
+	_close("★ 暴伤倍率 1.5 → 2.0 ★", multi_after, multi_before + 0.5)
+	_check("暴击伤害什么技能都能连", Gems.support_crit_damage().can_support(melee_tags))

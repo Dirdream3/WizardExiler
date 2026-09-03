@@ -17,7 +17,8 @@ extends RefCounted
 ## 免得跑一次测试就把玩家真正的背包覆盖了。
 static var path := "user://backpack.json"
 ## 存档格式版本。以后格式变了，靠它决定是升级还是直接丢弃重来。
-const VERSION := 1
+## 版本 2：法杖成了技能载体（技能石住进法杖槽），旧存档直接退回默认摆法。
+const VERSION := 2
 
 ## ★ 测试用的总开关 ★ 冒烟测试大部分时间会把它关掉。
 static var autosave := true
@@ -38,11 +39,13 @@ static func save(player: Player) -> bool:
 		return false
 	# ★ 存的是"当前技能是哪颗宝石"，不是下标 ★
 	#   skill_index 是 skill_items() 里的位置，而那个列表是**按摆放位置排序**的 ——
-	#   挪一下宝石、或者补进一颗新的技能石，同一个下标就指到别人身上去了。
+	#   挪一下法杖、或者补进一根新的，同一个下标就指到别人身上去了。
+	#   active_item 是法杖，真正的技能宝石在它的槽里（skill_gem()）。
 	var active := player.active_item()
+	var active_gem: SkillGem = active.skill_gem() if active != null else null
 	var data := {
 		"version": VERSION,
-		"skill_id": String(active.gem.id) if active != null else "",
+		"skill_id": String(active_gem.id) if active_gem != null else "",
 		"items": player.grid.to_data(),
 	}
 	var f := FileAccess.open(path, FileAccess.WRITE)
@@ -86,13 +89,15 @@ static func load_into(player: Player) -> bool:
 	#   你在 gem_library.gd 里加了一颗新辅助，不该因为老存档里没有就永远见不到它。
 	fill_missing(player.grid)
 
-	# 按 id 找回"上次在用哪颗技能"（找不到就用第一颗）
+	# 按 id 找回"上次在用哪颗技能"（找不到就用第一颗）。
+	# skill_items() 是"镶着宝石的法杖"，比对的是槽里宝石的 id。
 	player.skill_index = 0
 	var want := StringName(str(parsed.get("skill_id", "")))
 	if want != &"":
 		var skills := player.grid.skill_items()
 		for i in skills.size():
-			if (skills[i] as GemGrid.Placed).gem.id == want:
+			var sg := (skills[i] as GemGrid.Placed).skill_gem()
+			if sg != null and sg.id == want:
 				player.skill_index = i
 				break
 	return true
