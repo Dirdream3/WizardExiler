@@ -26,6 +26,7 @@ static func apprentice_wand() -> EquipItem:
 		"最朴素的法杖。没有词缀，但有一个镶嵌槽 —— 技能宝石镶进去才能施放。",
 		[])
 	e.socket_count = 1
+	e.socket_tags = T.SPELL   # 法杖只收法术（ADR-032）
 	return e
 
 
@@ -38,6 +39,69 @@ static func staff() -> EquipItem:
 			M.new(S.CAST_SPEED, M.Kind.INCREASED, 0.25, T.NONE),
 		])
 	e.socket_count = 1
+	e.socket_tags = T.SPELL
+	return e
+
+
+# ---------------------------------------------------------------- 近战武器（ADR-032）
+#
+# ★ 武器 = 攻击技能的载体 ★ 和法杖一模一样的槽，只是只收【攻击】技能。
+# 攻击技能自己的点伤很低，大头是武器上的「增加 N 点攻击伤害」（FLAT，要求 ATTACK 标签）——
+# 走 skill_mods 只加给槽里那颗技能：换武器 = 换这个技能的伤害底子（PoE 的"武器伤害"就是这个意思）。
+# 所有词缀都要求 ATTACK：放在背包里对法术零影响，基准角色（make_player）也不带它们。
+
+## 铁剑 1×3 —— 均衡：中等伤害、稍快
+static func iron_sword() -> EquipItem:
+	var e := _make(&"iron_sword", "铁剑", "剑", 1, 3,
+		"最普通的剑。攻击伤害 +70、攻速 +10%。攻击技能镶进来才能挥。",
+		[
+			M.new(S.DAMAGE, M.Kind.FLAT, 70.0, T.ATTACK),
+			M.new(S.ATTACK_SPEED, M.Kind.INCREASED, 0.10, T.ATTACK),
+		])
+	e.socket_count = 1
+	e.socket_tags = T.ATTACK
+	return e
+
+
+## 战斧 2×2 —— 重：近战伤害提高，攻速慢一点
+static func war_axe() -> EquipItem:
+	var e := _make(&"war_axe", "战斧", "斧", 2, 2,
+		"占 2×2 的大斧。攻击伤害 +110、近战伤害提高 15%，但攻速 −10%。",
+		[
+			M.new(S.DAMAGE, M.Kind.FLAT, 110.0, T.ATTACK),
+			M.new(S.DAMAGE, M.Kind.INCREASED, 0.15, T.ATTACK | T.MELEE),
+			M.new(S.ATTACK_SPEED, M.Kind.INCREASED, -0.10, T.ATTACK),
+		])
+	e.socket_count = 1
+	e.socket_tags = T.ATTACK
+	return e
+
+
+## 巨锤 2×3 —— 最重：伤害最高、挥砍范围更大，攻速最慢
+static func great_maul() -> EquipItem:
+	var e := _make(&"great_maul", "巨锤", "锤", 2, 3,
+		"占 2×3 的巨锤。攻击伤害 +170、攻击的范围 +30%，但攻速 −20%。横扫 / 重锤猛击的最佳搭档。",
+		[
+			M.new(S.DAMAGE, M.Kind.FLAT, 170.0, T.ATTACK),
+			M.new(S.AREA_OF_EFFECT, M.Kind.INCREASED, 0.30, T.ATTACK),
+			M.new(S.ATTACK_SPEED, M.Kind.INCREASED, -0.20, T.ATTACK),
+		])
+	e.socket_count = 1
+	e.socket_tags = T.ATTACK
+	return e
+
+
+## 匕首 1×2 —— 快而准：伤害低、攻速和暴击高。毒蛇打击 / 双重打击的搭档
+static func dagger() -> EquipItem:
+	var e := _make(&"dagger", "匕首", "匕", 1, 2,
+		"只占两格的匕首。攻击伤害 +45，攻速 +25%、攻击暴击率提高 60%。堆出手次数的武器。",
+		[
+			M.new(S.DAMAGE, M.Kind.FLAT, 45.0, T.ATTACK),
+			M.new(S.ATTACK_SPEED, M.Kind.INCREASED, 0.25, T.ATTACK),
+			M.new(S.CRIT_CHANCE, M.Kind.INCREASED, 0.60, T.ATTACK),
+		])
+	e.socket_count = 1
+	e.socket_tags = T.ATTACK
 	return e
 
 
@@ -87,9 +151,16 @@ static func sapphire_amulet() -> EquipItem:
 
 ## 全部装备。每次调用都是**新的实例**。
 ## ★ 见习法杖也在池子里 ★ —— 多一根法杖 = 多一个能同时携带的技能（Q 切换）。
+## 近战武器（ADR-032）也在：拿到武器 + 攻击技能才能打近战。
 static func all_items() -> Array:
 	return [apprentice_wand(), staff(), ring_of_flame(), iron_helm(), traveller_boots(),
-			arcane_belt(), sapphire_amulet()]
+			arcane_belt(), sapphire_amulet(),
+			iron_sword(), war_axe(), great_maul(), dagger()]
+
+
+## 全部近战武器
+static func all_weapons() -> Array:
+	return [iron_sword(), war_axe(), great_maul(), dagger()]
 
 
 ## 按 id 造一件新装备。读存档时用。找不到返回 null。
@@ -100,9 +171,12 @@ static func make_item(id: StringName):
 	return null
 
 
-## 开局身上带的这一套（`DemoContent.make_player()` 会把它的词缀装上）
+## 开局身上带的这一套（`DemoContent.make_player()` 会把它的词缀装上）。
+## ★ 故意不含近战武器 ★ —— 基准角色是老的那 7 件，所有老的伤害断言都建立在它上面；
+##   武器的词缀全要求 ATTACK 标签，就算装上也不影响法术，但没必要动基准。
 static func default_loadout() -> Array:
-	return all_items()
+	return [apprentice_wand(), staff(), ring_of_flame(), iron_helm(), traveller_boots(),
+			arcane_belt(), sapphire_amulet()]
 
 
 # ---------------------------------------------------------------- 内部

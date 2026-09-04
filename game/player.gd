@@ -1,4 +1,4 @@
-﻿class_name Player
+class_name Player
 extends CharacterBody2D
 
 ## 玩家的**表现层**。
@@ -15,12 +15,17 @@ const Art = preload("res://game/pixel_art.gd")
 const S = preload("res://combat/combat_stat.gd")
 const T = preload("res://combat/combat_tags.gd")
 
-signal cast_requested(from: Vector2, dir: Vector2)
-## 触媒触发了一次施法（World 负责选方向、生成投射物、飘字）。
-## pspec 已经用**被触发那根法杖**的词缀算好了 —— World 直接用，别再 build 一遍。
-signal catalyst_triggered(skill: SkillSpec, pspec: ProjectileSpec, cat_name: String)
+## 玩家要施法：from = 发射点，dir = 朝向（单位向量），aim = 鼠标在世界里指的点
+## （范围技能「指哪打哪」要用 aim；投射物只看 dir）
+signal cast_requested(from: Vector2, dir: Vector2, aim: Vector2)
+## 触媒触发了一次施法（World 负责选方向、生成投射物 / 画圈、飘字）。
+## pspec / aspec 已经用**被触发那根法杖**的词缀算好了 —— World 直接用，别再 build 一遍。
+## 投射物技能 pspec 非空、aspec 为 null；范围技能反过来（ADR-030）
+signal catalyst_triggered(skill: SkillSpec, pspec: ProjectileSpec, aspec: AreaSpec, cat_name: String)
 signal damaged(amount: float, is_crit: bool)
 signal healed(amount: float)
+## 身上被挂了一个减益（精英怪的爪类词条）。World 拿去飘字
+signal debuffed(buff_name: String)
 ## 技能石 / 辅助宝石 / 等级有任何变化（背包 UI 和 HUD 靠它刷新）
 signal gems_changed
 signal died
@@ -54,6 +59,8 @@ var can_aim := true
 
 var _cast_cd := 0.0
 var _hit_flash := 0.0
+## ★ 正在引导 ★（ADR-033）：按住引导技能、且上一段成功放出去了。引导中 Q 无效
+var _channeling := false
 
 ## 触媒缓存：网格里所有「箭头连着某根法杖的触媒」。rebuild() 时重扫，
 ## 免得每帧去跑 supports_for。元素是 { "wand": GemGrid.Placed, "cat": CatalystGem }
@@ -67,7 +74,7 @@ var _last_pos := Vector2.INF
 
 func _ready() -> void:
 	InputSetup.ensure()
-	sprite.texture = Art.player()
+	Art.char_setup(sprite, Art.player())
 	shadow.texture = Art.shadow()
 
 	stats = Demo.make_player()
@@ -194,8 +201,15 @@ func _default_layout() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed(&"switch_skill"):
-		set_skill(skill_index + 1)
+		# ★ 引导中不能切技能 ★（ADR-033）—— 松手再切
+		if not _channeling:
+			set_skill(skill_index + 1)
 		get_viewport().set_input_as_handled()
+
+
+## 现在正在引导吗（HUD 显示 / 测试用）
+func is_channeling() -> bool:
+	return _channeling
 
 
 # ------------------------------------------------------------------ 宝石
@@ -258,6 +272,7 @@ func rebuild() -> void:
 
 ## 切到第 index 颗主动技能石（会自动绕回来，所以可以一直 +1）。
 func set_skill(index: int) -> void:
+	_channeling = false   # 换了技能，引导自然断掉
 	var skills := grid.skill_items()
 	if skills.is_empty():
 		skill_index = 0
@@ -320,16 +335,29 @@ func change_level(gem, delta: int) -> void:
 	rebuild()
 
 
-## 当前技能这一发的投射物参数（HUD / Tab 面板显示用）
+## 当前技能这一发的投射物参数（HUD / Tab 面板显示用）。范围技能返回 null —— 它没有弹
 func projectile_spec() -> ProjectileSpec:
-	if skill == null:
+	if skill == null or not skill.is_projectile():
 		return null
 	return ProjectileSpec.build(stats, skill)
 
 
+## 当前技能的范围参数（范围技能才有，其它返回 null）
+func area_spec() -> AreaSpec:
+	if skill == null or not skill.is_area():
+		return null
+	return AreaSpec.build(stats, skill)
+
+
 func _physics_process(delta: float) -> void:
-	# 一行推进所有 Buff 计时 + DoT 结算
-	DamagePipeline.resolve_dots(stats, delta)
+	# 一行推进所有 Buff 计时 + DoT 结算。
+	# ★ DoT 也能把玩家烧死 ★（精英怪的「灼热之爪」）—— 以前没有怪能给玩家上 DoT，
+	#   这里从没处理过"被 DoT 打死"：血归零了却不发 died，World 永远不知道你死了。
+	var was_alive := stats.is_alive()
+	for ev in DamagePipeline.resolve_dots(stats, delta):
+		damaged.emit(ev["damage"], false)
+	if was_alive and not stats.is_alive():
+		died.emit()
 	if not stats.is_alive():
 		return
 
@@ -346,8 +374,15 @@ func _physics_process(delta: float) -> void:
 			stats.mana + stats.get_stat(S.MANA_REGEN, T.NONE, MANA_REGEN) * delta)
 
 	# --- 施法 ---
-	if Input.is_action_pressed(&"cast") and _cast_cd <= 0.0 and can_aim:
-		_try_cast()
+	# 引导技能和普通技能走同一条路：按住 → 冷却到了就再放一段。区别只在"引导状态"：
+	#   按住且上一段放出去了 = 正在引导（Q 被封）；松手 / 蓝不够放不出 = 引导结束
+	var holding := Input.is_action_pressed(&"cast") and can_aim
+	if holding and _cast_cd <= 0.0:
+		var fired := _try_cast()
+		if skill != null and skill.is_channel():
+			_channeling = fired    # 蓝不够 → 这一段没放出去 → 引导中断
+	if not holding or skill == null or not skill.is_channel():
+		_channeling = false
 
 	# --- 触媒：移动 / 计时事件由自己产生，然后统一泵一遍触发 ---
 	if _last_pos == Vector2.INF:
@@ -365,23 +400,30 @@ func _physics_process(delta: float) -> void:
 		sprite.modulate = Color(1, 1, 1).lerp(Color(2.5, 1.2, 1.2), _hit_flash / 0.12)
 
 
-func _try_cast() -> void:
+## 放一次（引导技能 = 放一段）。返回 true = 真的放出去了；false = 没技能 / 蓝不够
+func _try_cast() -> bool:
 	if skill == null or stats.mana < skill.mana_cost:
-		return
+		return false
 	var dir := get_global_mouse_position() - global_position
 	if dir.length_squared() < 1.0:
 		dir = Vector2.RIGHT
 	dir = dir.normalized()
 
 	stats.mana -= skill.mana_cost
+	# ★ 引导蓄力（ADR-036，焚烧）★ 每放一段给自己叠一层；松手后 Buff 自己过期，蓄力归零
+	if skill.channel_ramp != null:
+		stats.apply_buff(skill.channel_ramp)
 	# ★ 施法间隔 = 技能石上的「施放时间」÷ 施法速度倍率 ★
 	#   电球术 0.65 秒 ÷ 施法速度 1.25 = 0.52 秒一发。
 	#   装备/辅助宝石上的「提高施法速度」会自动缩短它，不用改任何代码。
-	var speed := maxf(0.1, stats.get_stat(S.CAST_SPEED, skill.hit_tags()))
+	#   ★ 攻击技能走「攻击速度」（ADR-032）★ 武器上的攻速词缀在这里生效，施法速度对它无效
+	var speed_stat := S.ATTACK_SPEED if skill.is_attack() else S.CAST_SPEED
+	var speed := maxf(0.1, stats.get_stat(speed_stat, skill.hit_tags()))
 	_cast_cd = maxf(0.05, skill.cast_time / speed)
 
 	sprite.flip_h = dir.x < 0.0
-	cast_requested.emit(global_position + Vector2(0, -7), dir)
+	cast_requested.emit(global_position + Vector2(0, -7), dir, get_global_mouse_position())
+	return true
 
 
 # ------------------------------------------------------------------ 触媒
@@ -425,12 +467,22 @@ func _try_trigger(wand: GemGrid.Placed, cat: CatalystGem) -> bool:
 	# 投射物飞行途中命中时用的仍是"彼时的当前词缀"——和手动切技能同一个已知误差。
 	stats.skill_mods.clear()
 	stats.skill_mods.add_all(link.mods())
-	var pspec := ProjectileSpec.build(stats, tskill)
+	var pspec: ProjectileSpec = ProjectileSpec.build(stats, tskill) if tskill.is_projectile() else null
+	var aspec: AreaSpec = AreaSpec.build(stats, tskill) if tskill.is_area() else null
 	stats.skill_mods.clear()
 	stats.skill_mods.add_all(active_link().mods())
 
-	catalyst_triggered.emit(tskill, pspec, cat.display_name)
+	catalyst_triggered.emit(tskill, pspec, aspec, cat.display_name)
 	return true
+
+
+## 被怪挂了一个减益（精英怪的爪类词条）。规则全在 CombatEntity.apply_buff，
+## 这里只多发一个信号让 World 飘字 —— 不然只看到血在掉 / 人变慢，不知道为什么。
+func receive_buff(def: BuffDef, from: CombatEntity = null) -> void:
+	if not stats.is_alive():
+		return
+	stats.apply_buff(def, from)
+	debuffed.emit(def.display_name)
 
 
 ## 挨打。伤害已经由 DamagePipeline 算好了，这里只负责扣血和表现。

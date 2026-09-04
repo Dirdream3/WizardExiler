@@ -1,4 +1,4 @@
-﻿class_name GameWorld
+class_name GameWorld
 extends Node2D
 
 ## 主场景：搭场地、刷怪、把各方的信号接起来。
@@ -18,6 +18,7 @@ const PLAYER_SCENE := preload("res://game/player.tscn")
 const ENEMY_SCENE := preload("res://game/enemy.tscn")
 const PROJECTILE_SCENE := preload("res://game/projectile.tscn")
 const Art = preload("res://game/pixel_art.gd")
+const Demo = preload("res://data/demo_content.gd")
 
 ## 场地半宽半高 → 实际 400×400。
 ##
@@ -28,12 +29,17 @@ const Art = preload("res://game/pixel_art.gd")
 const ARENA := Vector2(200, 200)
 const MAX_ENEMIES := 5
 const RESPAWN_DELAY := 2.2
+## 沙盒模式每刷几只就来一只精英（让沙盒里也能看到精英怪长什么样）
+const SANDBOX_ELITE_EVERY := 4
+## 瘟疫扩散半径（像素）：带瘟疫的怪死掉时传给多远以内的怪
+const CONTAGION_SPREAD := 70.0
 
 var player: Player
 var kills := 0
 
 ## 投射物各种行为发生了多少次（HUD 调试 / 冒烟测试用）
-var behaviour_counts := {"pierce": 0, "fork": 0, "chain": 0, "chain_fail": 0, "bounce": 0}
+var behaviour_counts := {"pierce": 0, "fork": 0, "chain": 0, "chain_fail": 0, "bounce": 0,
+		"link": 0, "link_fail": 0, "area": 0, "area_hits": 0}
 
 # ---- 局模式（RunSession.enabled 时才用）----
 ## 局内流程界面（挂在 HUD 上，这里存个引用方便接信号/测试）
@@ -44,6 +50,19 @@ var _room_active := false
 ## 本步商店的货架 + 已卖掉的位置（货架由种子定，退出重进不变）
 var _shop_stock: Array = []
 var _shop_sold: Array = []
+## ★ 这一房还没上场的怪（排队中）★ 每个元素是配好数值的 CombatEntity（ADR-028）。
+##   队头先上；精英排在队尾压轴。空了 = 全都放出来了。
+var _room_queue: Array = []
+## 同一时刻场上最多几只（超出的在 _room_queue 里等）
+var room_alive_cap := 0
+## 死一只之后隔多久补一只（秒）。★ 是 var 不是 const ★ 冒烟测试把它设成 0 让队列一帧放一只，
+## 不然每房十几只怪要等十几秒
+var reinforce_delay := 0.9
+var _reinforce_cd := 0.0
+## 沙盒模式刷了几只（每 SANDBOX_ELITE_EVERY 只来一只精英）
+var _sandbox_spawns := 0
+## 守关 Boss 掉的血脉辅助，还没放进背包的那颗（ADR-031）。null = 没有待放的
+var _pending_lineage: SupportGem = null
 
 var _spawn_cd := 0.0
 var _rng := RandomNumberGenerator.new()
@@ -87,7 +106,14 @@ func _process(delta: float) -> void:
 		_spawn_cd -= delta
 		if _spawn_cd <= 0.0 and get_tree().get_node_count_in_group(&"enemy") < MAX_ENEMIES:
 			_spawn_cd = RESPAWN_DELAY
-			_spawn_enemy()
+			_spawn_sandbox_enemy()
+	elif _room_active and not _room_queue.is_empty():
+		# ★ 局模式的增援 ★ 场上少于上限就从队列补一只，两只之间隔 reinforce_delay 秒
+		#   —— 不是死一只立刻冒一只，那样玩家感觉不到"这一波打完了"
+		_reinforce_cd -= delta
+		if _reinforce_cd <= 0.0 and alive_enemies() < room_alive_cap:
+			_reinforce_cd = reinforce_delay
+			_spawn_enemy(_room_queue.pop_front())
 
 	# ★ 鼠标跑到左边面板上时不许施法 ★
 	#   玩家在 SubViewport 里，拿不到"主窗口的鼠标在哪"，所以由这里告诉它。
@@ -157,6 +183,10 @@ func _spawn_player() -> void:
 		if amount >= 1.0:
 			FloatingText.spawn(fx, player.global_position + Vector2(0.0, -24.0),
 					"+%d" % roundi(amount), Color(0.55, 0.92, 0.45)))
+	# 精英怪的爪类词条把异常挂到玩家身上时飘个字，不然只看到血在掉不知道为什么
+	player.debuffed.connect(func(buff_name: String) -> void:
+		FloatingText.spawn(fx, player.global_position + Vector2(0.0, -30.0),
+				"中了【%s】" % buff_name, Color(0.85, 0.55, 0.95)))
 
 	# 摄像机别拍到场地外面
 	var cam := player.get_node("Camera") as Camera2D
@@ -166,9 +196,30 @@ func _spawn_player() -> void:
 	cam.limit_bottom = int(ARENA.y)
 
 
+## 场上活着的怪有几只。★ 用 get_nodes_in_group 而不是 get_node_count ★ ——
+## 刚死的怪 queue_free 之后到这一帧结束前还在组里，得按 is_alive 过滤掉，
+## 不然增援会因为"数到了一具尸体"而少放一只。
+func alive_enemies() -> int:
+	var n := 0
+	for node in get_tree().get_nodes_in_group(&"enemy"):
+		var e := node as Enemy
+		if e != null and is_instance_valid(e) and e.stats != null and e.stats.is_alive():
+			n += 1
+	return n
+
+
+## 沙盒模式的一只怪：每 SANDBOX_ELITE_EVERY 只来一只精英（基准骷髅 + 1 条随机词条）
+func _spawn_sandbox_enemy() -> void:
+	_sandbox_spawns += 1
+	if _sandbox_spawns % SANDBOX_ELITE_EVERY == 0:
+		_spawn_enemy(RunContent.make_elite_from(Demo.make_monster(), 1, _rng))
+	else:
+		_spawn_enemy()
+
+
 ## 刷一只怪。
-##   stats —— 传了就用这份数值（局模式的按步成长怪 / Boss）；不传用默认骷髅
-##   scale —— 体型倍率（Boss 画大一圈，碰撞体会跟着一起放大）
+##   stats —— 传了就用这份数值（局模式的按步成长怪 / 精英 / Boss）；不传用默认骷髅
+##   scale —— 体型倍率（Boss 画大一圈，碰撞体会跟着一起放大）。精英的体型由 Enemy 自己按词条再乘
 func _spawn_enemy(stats: CombatEntity = null, body_scale: float = 1.0) -> void:
 	var e: Enemy = ENEMY_SCENE.instantiate()
 	if stats != null:
@@ -220,25 +271,37 @@ func projectile_bounds() -> Rect2:
 	return Rect2(-ARENA - pad, (ARENA + pad) * 2.0)
 
 
-func _on_cast_requested(from: Vector2, dir: Vector2) -> void:
+## 玩家施法。aim = 鼠标在世界里指的点；不传（测试直接调时）就当作"朝 dir 方向的最远处"
+func _on_cast_requested(from: Vector2, dir: Vector2, aim: Vector2 = Vector2.INF) -> void:
 	var skill: SkillSpec = player.skill
 	if skill == null:
 		return   # 当前法杖是空的
-	_launch_volley(ProjectileSpec.build(player.stats, skill), skill, from, dir)
+	# ★ 两条管线（ADR-030）★：范围技能画圈结算，投射物技能发弹
+	if skill.is_area():
+		_cast_area(AreaSpec.build(player.stats, skill), skill, player.stats, from, dir, aim, false)
+	else:
+		_launch_volley(ProjectileSpec.build(player.stats, skill), skill, from, dir)
 
 
 ## ★ 触媒触发的施法 ★ 没有施法动作，也没有"鼠标方向"——
 ## 朝最近的敌人打；场上没有敌人就朝玩家面朝的方向。
 ## pspec 由 Player 用被触发那根法杖的词缀算好了，这里直接用。
-func _on_catalyst_triggered(skill: SkillSpec, pspec: ProjectileSpec, cat_name: String) -> void:
+func _on_catalyst_triggered(skill: SkillSpec, pspec: ProjectileSpec, aspec: AreaSpec,
+		cat_name: String) -> void:
 	var target := UIHelper.nearest_enemy(get_tree(), player)
 	var dir := Vector2.LEFT if player.sprite.flip_h else Vector2.RIGHT
+	var aim := Vector2.INF
 	if target != null:
 		dir = (target.global_position - player.global_position).normalized()
+		aim = target.global_position   # 「指哪打哪」的范围技能被触发时直接砸最近的怪
 	FloatingText.spawn(fx, player.global_position + Vector2(0.0, -26.0),
 			"✧%s" % cat_name, Color(0.80, 0.60, 0.95))
 	# ★ from_trigger = true：触发产物的击中/异常不喂触媒（防循环，ADR-026）★
-	_launch_volley(pspec, skill, player.global_position + Vector2(0, -7), dir, true)
+	var from := player.global_position + Vector2(0, -7)
+	if aspec != null:
+		_cast_area(aspec, skill, player.stats, from, dir, aim, true)
+	else:
+		_launch_volley(pspec, skill, from, dir, true)
 
 
 ## 把一次施法的投射物全部射出去（手动施法和触媒触发共用这一段）。
@@ -258,6 +321,157 @@ func _launch_volley(spec: ProjectileSpec, skill: SkillSpec, from: Vector2, dir: 
 		_spawn_projectile(origin, dir.rotated(a), st, skill, player.stats)
 
 
+# ------------------------------------------------------------------ 范围技能（ADR-030）
+
+## 放一个范围技能：定圆心 → 有延迟就先画预警圈、到点再结算；瞬发就直接结算。
+##   src —— 用谁的属性算伤害（玩家）
+##   aim —— 鼠标指的世界坐标；INF = 没有（触媒触发 / 测试），就朝 dir 方向打到射程尽头
+func _cast_area(aspec: AreaSpec, skill: SkillSpec, src: CombatEntity,
+		from: Vector2, dir: Vector2, aim: Vector2, from_trigger: bool) -> void:
+	var centre := from
+	if aspec.origin == AreaSpec.Origin.FRONT:
+		# 近战挥砍 / 冰川之刺：面前固定距离处，朝向跟鼠标
+		centre = from + dir * aspec.range
+	elif aspec.origin == AreaSpec.Origin.TARGET:
+		var want := aim if aim != Vector2.INF else from + dir * aspec.range
+		var offset := want - from
+		# 射程由纯逻辑夹（clamp_distance），方向由这里保留 —— 超出射程就落在射程边上
+		var d := aspec.clamp_distance(offset.length())
+		centre = from + (offset.normalized() * d if offset.length() > 0.001 else Vector2.ZERO)
+	centre = centre.clamp(-ARENA, ARENA)   # 圈心别落到墙外
+
+	# ★ 连环范围（ADR-031）★ 主圈 + 沿施法方向前后各几个圈，间距 = 1.2 个半径（圈和圈刚好不重叠）。
+	#   方向：指哪打哪的用"从脚下到圆心"的方向，以自己为中心的用面朝方向
+	var axis := dir
+	if aspec.origin == AreaSpec.Origin.TARGET and centre.distance_to(from) > 0.001:
+		axis = (centre - from).normalized()
+	var centres: Array = [centre]
+	for k in aspec.cascade_offsets():
+		centres.append((centre + axis * float(k) * aspec.radius * 1.2).clamp(-ARENA, ARENA))
+
+	for c in centres:
+		var at: Vector2 = c
+		var burst := AreaBurst.new()
+		burst.position = at
+		burst.radius = aspec.radius
+		burst.delay = aspec.delay
+		burst.pulses = aspec.pulses
+		burst.interval = aspec.interval
+		burst.color = _area_color(skill)
+		# 贴图特效（ADR-037 补充）：爆发图按元素、锥用光束图、近战挥砍用刀光
+		burst.burst_tex = Art.fx_burst(skill.tags)
+		burst.beam_tex = Art.fx_beam(skill.tags)
+		# 近战挥砍画成朝向前方的扇形（只是画法；命中判定仍是整个圈）
+		if skill.is_attack() and aspec.origin == AreaSpec.Origin.FRONT:
+			burst.facing = axis.angle()
+			burst.arc_deg = 200.0
+			burst.slash = true
+			burst.burst_tex = Art.fx_slash()
+		# ★ 真扇形（焚烧 / 闪电之触 / 裂雷之矛，ADR-034）★ 画法和判定都是扇形
+		if aspec.is_cone():
+			burst.facing = axis.angle()
+			burst.arc_deg = aspec.arc_deg
+			if skill.is_attack():
+				burst.slash = true
+				burst.burst_tex = Art.fx_slash()
+		# ★ 结算挂在 exploded 上，而不是现在就算 ★ —— 风暴呼唤要 1.2 秒后才劈，
+		#   期间怪走进走出圈都算数；瞬发的新星 _ready 里立刻发 exploded，等价于马上结算。
+		#   脉冲技能每炸一次发一次，每次都是一轮完整的结算
+		# ★ 跟着施法者走的圈（旋风斩 / 双重打击）★ 位置每帧由 AreaBurst 更新，
+		#   结算读圈**此刻**的位置 —— 所以 lambda 里不能用捕获的 at，要问 burst 自己
+		if aspec.follow:
+			burst.follow = player
+			burst.follow_offset = at - player.global_position
+		burst.exploded.connect(func() -> void:
+			_resolve_area(burst.global_position, aspec, skill, src, from_trigger, axis))
+		fx.add_child(burst)
+
+
+## 圈到点了：谁在圈里就各吃一次命中。判定交给 AreaSpec.hits()（纯逻辑），这里只喂距离。
+##   axis —— 施法朝向（扇形要用：夹角超过 arc/2 的不算在圈里）
+func _resolve_area(centre: Vector2, aspec: AreaSpec, skill: SkillSpec, src: CombatEntity,
+		from_trigger: bool, axis: Vector2 = Vector2.RIGHT) -> void:
+	var candidates: Array = []
+	for n in get_tree().get_nodes_in_group(&"enemy"):
+		var e := n as Enemy
+		if e == null or not is_instance_valid(e) or e.stats == null or not e.stats.is_alive():
+			continue
+		var to_e := e.global_position - centre
+		candidates.append({"id": e.get_instance_id(), "dist": to_e.length(),
+				"angle": absf(axis.angle_to(to_e)) if to_e.length() > 0.001 else 0.0})
+	var ids := aspec.hits(candidates)
+	behaviour_counts["area"] = int(behaviour_counts.get("area", 0)) + 1
+	behaviour_counts["area_hits"] = int(behaviour_counts.get("area_hits", 0)) + ids.size()
+
+	for id in ids:
+		var e := instance_from_id(id) as Enemy
+		if e == null or not is_instance_valid(e) or not e.stats.is_alive():
+			continue
+		# ① 伤害：和投射物完全同一条五步管线，一个技能一个目标一次 compute_hit
+		var r := DamagePipeline.compute_hit(src, e.stats, skill, _rng)
+		e.take_hit(r)
+		# ② 技能自带的异常（新星冰缓 / 电击新星感电），几率判定和投射物同口径
+		if _rng.randf() <= skill.on_hit_chance:
+			for b in skill.on_hit_buffs:
+				e.stats.apply_buff(b, src)
+				if not from_trigger:
+					_on_projectile_behaviour("buff_%s" % (b as BuffDef).id, e.global_position)
+		# ③ 连击触媒：范围命中也算击中（触发产物不喂，ADR-026）
+		if not from_trigger and player != null:
+			player.notify_catalyst_event(CatalystGem.Trigger.HITS, 1.0)
+
+
+## 投射物命中爆炸：以命中点为中心炸一圈，打周围除了 hit_id 之外的敌人（它已经吃过直接命中）
+func _explode_at(at: Vector2, hit_id: int, radius: float, skill: SkillSpec, src: CombatEntity,
+		from_trigger: bool) -> void:
+	var aspec := AreaSpec.new()
+	aspec.radius = radius
+	var burst := AreaBurst.new()
+	burst.position = at
+	burst.radius = radius
+	burst.color = _area_color(skill)
+	burst.burst_tex = Art.fx_burst(skill.tags)
+	fx.add_child(burst)
+	# 结算：和范围技能同一条路，只是把直接命中的那只剔掉
+	var candidates: Array = []
+	for n in get_tree().get_nodes_in_group(&"enemy"):
+		var e := n as Enemy
+		if e == null or not is_instance_valid(e) or e.stats == null or not e.stats.is_alive():
+			continue
+		if e.get_instance_id() == hit_id:
+			continue
+		candidates.append({"id": e.get_instance_id(), "dist": at.distance_to(e.global_position)})
+	var ids := aspec.hits(candidates)
+	behaviour_counts["explode"] = int(behaviour_counts.get("explode", 0)) + 1
+	behaviour_counts["explode_hits"] = int(behaviour_counts.get("explode_hits", 0)) + ids.size()
+	for id in ids:
+		var e := instance_from_id(id) as Enemy
+		if e == null or not is_instance_valid(e) or not e.stats.is_alive():
+			continue
+		var r := DamagePipeline.compute_hit(src, e.stats, skill, _rng)
+		e.take_hit(r)
+		if _rng.randf() <= skill.on_hit_chance:
+			for b in skill.on_hit_buffs:
+				e.stats.apply_buff(b, src)
+				if not from_trigger:
+					_on_projectile_behaviour("buff_%s" % (b as BuffDef).id, e.global_position)
+		if not from_trigger and player != null:
+			player.notify_catalyst_event(CatalystGem.Trigger.HITS, 1.0)
+
+
+## 圈的颜色按元素分（和投射物拖尾一个口径）
+func _area_color(skill: SkillSpec) -> Color:
+	if skill.tags & CombatTags.LIGHTNING:
+		return Color(0.85, 0.75, 1.0)
+	if skill.tags & CombatTags.COLD:
+		return Color(0.60, 0.88, 1.0)
+	if skill.tags & CombatTags.FIRE:
+		return Color(1.0, 0.62, 0.30)
+	if skill.tags & CombatTags.CHAOS:
+		return Color(0.65, 0.92, 0.42)
+	return Color(0.9, 0.9, 0.95)
+
+
 ## 生成一发投射物。分叉时投射物会回调这个方法再生成两发，所以是递归的。
 ##
 ## skill / src 要跟着一起传：投射物飞在半空时玩家可能已经切了技能，
@@ -273,8 +487,29 @@ func _spawn_projectile(pos: Vector2, dir: Vector2, state: ProjectileState,
 	p.state = state
 	p.bounds = bounds
 	p.lifetime = state.spec.duration
+	p.caster = player
 	p.spawn_requested.connect(_spawn_projectile)
 	p.behaviour.connect(_on_projectile_behaviour)
+	# ★ 命中爆炸（ADR-036：火球 / 翻滚岩浆）★ 每次命中在命中点炸一圈，打周围**其他**敌人
+	if state.spec.explode_radius > 0.0:
+		p.hit_enemy.connect(func(e: Enemy, _r: HitResult) -> void:
+			_explode_at(e.global_position, e.get_instance_id(), state.spec.explode_radius, skill, src, state.from_trigger))
+	# ★ 随行光环（ADR-036：灵魂撕裂）★ 一个跟着投射物走的圈，每 interval 秒结算一次，投射物没了它也没了
+	if state.spec.aura_radius > 0.0:
+		var aura := AreaBurst.new()
+		aura.radius = state.spec.aura_radius
+		aura.delay = state.spec.aura_interval
+		aura.interval = state.spec.aura_interval
+		aura.pulses = maxi(1, int(ceilf(state.spec.duration / state.spec.aura_interval)))
+		aura.color = _area_color(skill)
+		aura.burst_tex = Art.fx_burst(skill.tags)
+		aura.follow = p
+		aura.die_with_follow = true
+		var aura_spec := AreaSpec.new()
+		aura_spec.radius = state.spec.aura_radius
+		aura.exploded.connect(func() -> void:
+			_resolve_area(aura.global_position, aura_spec, skill, src, state.from_trigger))
+		fx.add_child.call_deferred(aura)
 	# ★ 连击触媒数的是投射物的直接命中（DoT 跳伤不算）★
 	# 挂在投射物自己的 hit_enemy 上而不是敌人的受击信号上，是因为要看
 	# from_trigger：触媒触发出来的弹，命中不给触媒攒进度（防循环，ADR-026）
@@ -298,6 +533,8 @@ func _on_projectile_behaviour(kind: String, pos: Vector2) -> void:
 			FloatingText.spawn(fx, at, "分叉", Color(0.72, 1.0, 0.52))
 		"chain":
 			FloatingText.spawn(fx, at, "弹射", Color(0.95, 0.72, 1.0))
+		"link":
+			FloatingText.spawn(fx, at, "连锁", Color(0.75, 0.85, 1.0))
 		# ★ 施加异常的事件转给触媒计数 ★（buff_* 由 Projectile 在施加 Debuff 时上报）
 		"buff_shock":
 			player.notify_catalyst_event(CatalystGem.Trigger.SHOCK_APPLIED, 1.0)
@@ -311,6 +548,19 @@ func _on_projectile_behaviour(kind: String, pos: Vector2) -> void:
 
 func _on_enemy_died(who: Enemy) -> void:
 	kills += 1
+	# ★ 瘟疫扩散（ADR-036）★ 带着瘟疫死掉的怪，把瘟疫传给身边 CONTAGION_SPREAD 像素内的怪（PoE 的 Contagion）
+	if who.stats != null and who.stats.buffs.has(&"contagion") and player != null:
+		var spread := 0
+		for n in get_tree().get_nodes_in_group(&"enemy"):
+			var e := n as Enemy
+			if e == null or e == who or not is_instance_valid(e) or e.stats == null or not e.stats.is_alive():
+				continue
+			if e.global_position.distance_to(who.global_position) <= CONTAGION_SPREAD:
+				e.stats.apply_buff(Demo.buff_contagion(), player.stats)
+				spread += 1
+		if spread > 0:
+			behaviour_counts["contagion_spread"] = int(behaviour_counts.get("contagion_spread", 0)) + spread
+			FloatingText.spawn(fx, who.global_position + Vector2(0.0, -34.0), "瘟疫扩散 ×%d" % spread, Color(0.65, 0.92, 0.42))
 	FloatingText.spawn(fx, who.global_position + Vector2(0.0, -28.0), "击杀!",
 			Color(0.62, 0.95, 0.50), true)
 	if player != null and player.stats.is_alive():
@@ -369,15 +619,26 @@ func _on_room_chosen(index: int) -> void:
 
 func _start_combat(room: RunMap.Room) -> void:
 	_room_active = true
+	_room_queue.clear()
+	_reinforce_cd = reinforce_delay
 	var st := RunSession.state
 	if room.type == RunMap.RoomType.BOSS:
-		# 每层的 Boss 都走 make_boss(层数)：前三层是缩水的守关 Boss，第 4 层才是完全体
-		room_enemies_left = 1
+		# 每层的 Boss 都走 make_boss(层数)：前三层是缩水的守关 Boss，第 4 层才是完全体。
+		# Boss 带护卫一起上（2 + 层数只普通怪），全部一次到场 —— Boss 房不分波
+		var escorts := RunContent.boss_escorts(st.floor_index)
+		room_enemies_left = 1 + escorts
+		room_alive_cap = room_enemies_left
 		_spawn_enemy(RunContent.make_boss(st.floor_index), 1.7)
-	else:
-		room_enemies_left = RunContent.enemies_for_step(st.step)
-		for i in room_enemies_left:
+		for i in escorts:
 			_spawn_enemy(RunContent.make_room_monster(st.step, st.floor_index))
+	else:
+		# ★ 分波上场（ADR-028）★ 名单一次配好（精英词条用 rng_for("elite")，同局同房定死），
+		#   先放满一波，剩下的排队，死一只补一只（在 _process 里）
+		_room_queue = RunContent.room_roster(st.step, st.floor_index, st.rng_for("elite"))
+		room_enemies_left = _room_queue.size()
+		room_alive_cap = RunContent.max_alive_for_step(st.step, st.floor_index)
+		while not _room_queue.is_empty() and alive_enemies() < room_alive_cap:
+			_spawn_enemy(_room_queue.pop_front())
 
 
 func _on_room_cleared() -> void:
@@ -403,8 +664,19 @@ func _on_room_cleared() -> void:
 	# 奖励三选一：候选用 rng_for("reward") 掷 → 同一局同一处永远同一批，读档回来也一样。
 	# ★ owned 要用 owned_gems()：镶在法杖槽里的宝石也算"拥有"，升级奖励得能升到它 ★
 	var options := RunRewards.roll_options(room.reward, st.rng_for("reward"),
-			RunContent.reward_pools(player.grid.owned_gems()))
+			RunContent.reward_pools(player.grid.owned_gems(), st.floor_index))
 	run_ui.show_reward(room.reward, options, gold_gain)
+	# ★ 守关 Boss 必掉一颗血脉辅助（ADR-031）★ 不占三选一的位置，直接进背包；
+	#   放不下就先记着，离开奖励界面前必须腾出地方（_leave_step 会拦）—— 不能让它丢了
+	if room.type == RunMap.RoomType.BOSS:
+		var owned_ids: Array = []
+		for g in GemLibrary.all_lineage():
+			if player.grid.has_gem((g as SupportGem).id):
+				owned_ids.append((g as SupportGem).id)
+		var lin := RunContent.boss_lineage(owned_ids, st.rng_for("lineage"))
+		if lin != null:
+			_pending_lineage = lin
+			_try_place_lineage()
 	run_ui.set_status(st)
 
 
@@ -425,8 +697,24 @@ func _on_reward_skipped() -> void:
 	_leave_step()
 
 
+## Boss 掉的血脉辅助往背包里放。放进去了返回 true（并在奖励面板上告诉玩家）
+func _try_place_lineage() -> bool:
+	if _pending_lineage == null:
+		return true
+	if player.grid.place_anywhere(_pending_lineage) == null:
+		run_ui.note("★ Boss 掉落血脉辅助「%s」—— 背包放不下！先在左边腾出一格再继续" % _pending_lineage.display_name)
+		return false
+	run_ui.note("★ Boss 掉落血脉辅助「%s」，已放入背包 ★" % _pending_lineage.display_name)
+	_pending_lineage = null
+	player.rebuild()
+	return true
+
+
 ## 领完奖 / 逛完店，走向下一步，回到地图
 func _leave_step() -> void:
+	# 血脉辅助还没放进背包 → 不许走，再试一次（玩家可能刚腾出格子）
+	if not _try_place_lineage():
+		return
 	var st := RunSession.state
 	st.advance()
 	run_ui.show_map(st)
@@ -438,7 +726,7 @@ func _leave_step() -> void:
 func _open_shop() -> void:
 	var st := RunSession.state
 	# 货架由种子 + 步数决定：读档回来、退出重进，货都一样，防"刷货架"
-	_shop_stock = RunContent.shop_stock(st.rng_for("shop"))
+	_shop_stock = RunContent.shop_stock(st.rng_for("shop"), st.floor_index)
 	_shop_sold = []
 	run_ui.show_shop(st, _shop_stock, _shop_sold)
 

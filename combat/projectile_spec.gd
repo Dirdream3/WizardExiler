@@ -1,4 +1,4 @@
-﻿class_name ProjectileSpec
+class_name ProjectileSpec
 extends RefCounted
 
 ## 一发投射物的**行为参数** —— 由「技能基础值 + 角色词缀」算出来。
@@ -43,8 +43,22 @@ var pierce_count: int = 0
 var pierce_chance: float = 0.0
 var fork_count: int = 0
 var chain_count: int = 0
+## ★ 连锁次数（ADR-035）★ 和 chain_count（弹射）是两套：连锁不重复命中、连锁中速度 ×(1 + LINK_SPEED_MORE)
+var link_count: int = 0
 var fork_angle_deg: float = 30.0
-var chain_range: float = 150.0
+var chain_range: float = 150.0   ## 弹射和连锁共用这个搜索半径
+
+# ---------------------------------------------------------------- 差异化（ADR-036）
+var transform_after_px: float = 0.0   ## 飞过这么多像素后变形（0 = 不变形）
+var transform_speed_mult: float = 1.0
+var transform_crit_mult: float = 1.0
+var returns: bool = false              ## 回旋：存活过半掉头飞回
+var explode_radius: float = 0.0        ## 命中爆炸半径（已吃「范围效果」）。0 = 不炸
+var aura_radius: float = 0.0           ## 随行光环半径（已吃「范围效果」）。0 = 没有
+var aura_interval: float = 0.3
+
+## 连锁中的投射物「更多 500% 速度」—— 电弧的跳跃几乎是瞬间的，这就是"连锁"和"弹射"手感上的区别
+const LINK_SPEED_MORE := 5.0
 
 # ---------------------------------------------------------------- 撞墙
 ## 撞到墙/地形能镜面弹开几次。★ 和「弹射(chain)」是两回事 ★
@@ -90,6 +104,18 @@ static func build(attacker: CombatEntity, skill: SkillSpec) -> ProjectileSpec:
 	s.fork_count = _as_count(attacker.get_stat(CombatStat.FORK_COUNT, tags, float(skill.base_fork)))
 	s.chain_count = _as_count(attacker.get_stat(CombatStat.CHAIN_COUNT, tags, float(skill.base_chain)))
 	s.chain_range = maxf(0.0, attacker.get_stat(CombatStat.CHAIN_RANGE, tags, skill.chain_range))
+	s.link_count = _as_count(attacker.get_stat(CombatStat.LINK_COUNT, tags, float(skill.base_link)))
+
+	# --- 差异化（ADR-036）---
+	s.transform_after_px = skill.transform_after_px
+	s.transform_speed_mult = skill.transform_speed_mult
+	s.transform_crit_mult = skill.transform_crit_mult
+	s.returns = skill.projectile_returns
+	# 爆炸 / 光环的半径和范围技能一样吃「范围效果」（面积倍率的平方根）
+	var area_mult := maxf(0.05, attacker.get_stat(CombatStat.AREA_OF_EFFECT, tags, 1.0))
+	s.explode_radius = skill.area_radius * sqrt(area_mult) if skill.explodes_on_hit() else 0.0
+	s.aura_radius = skill.aura_radius * sqrt(area_mult)
+	s.aura_interval = skill.aura_interval
 	s.fork_angle_deg = skill.fork_angle_deg
 
 	# --- 撞墙 ---
@@ -142,9 +168,19 @@ func describe() -> String:
 	if fork_count > 0:
 		parts.append("分叉 %d" % fork_count)
 	if chain_count > 0:
-		parts.append("连锁 %d" % chain_count)
+		parts.append("弹射 %d" % chain_count)
+	if link_count > 0:
+		parts.append("连锁 %d" % link_count)
 	if bounce_count > 0:
 		parts.append("反弹 %d" % bounce_count)
+	if explode_radius > 0.0:
+		parts.append("命中爆炸 r%.0f" % explode_radius)
+	if transform_after_px > 0.0:
+		parts.append("飞 %.0f 后变形" % transform_after_px)
+	if returns:
+		parts.append("回旋")
+	if aura_radius > 0.0:
+		parts.append("随行光环 r%.0f" % aura_radius)
 	parts.append("速度 %.0f" % speed)
 	parts.append("存活 %.1fs" % duration)
 	return "  ".join(parts)

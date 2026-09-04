@@ -1,4 +1,4 @@
-﻿class_name Projectile
+class_name Projectile
 extends Area2D
 
 ## 投射物的**表现层**（火球术 / 电球术都是它）。
@@ -41,6 +41,12 @@ var bounds := Rect2()
 
 var _rng := RandomNumberGenerator.new()
 
+## ★ 连锁的目标 ★（ADR-036 修正）：连锁中每帧朝它飞、一步能到就直接贴上去。
+## 以前只是"转向它然后 6 倍速直飞"—— 每物理帧飞 30 像素、怪的碰撞圈只有几像素，大多数时候从中间穿过去了
+var _link_target: Enemy = null
+## 回旋要飞回去的那个人（World 生成时塞进来）
+var caster: Node2D = null
+
 @onready var sprite: Sprite2D = $Sprite
 @onready var trail: Line2D = $Trail
 
@@ -51,14 +57,20 @@ func _ready() -> void:
 		state = ProjectileState.new(ProjectileSpec.new())
 
 	# 外观按技能标签选：闪电系用电球贴图 + 紫色拖尾，冰系用冰晶 + 冰蓝拖尾，其它用火球
+	var tex: Texture2D = Art.fireball()
 	if skill != null and (skill.tags & T.LIGHTNING) != 0:
-		sprite.texture = Art.spark()
-		trail.default_color = Color(0.78, 0.62, 1.0, 0.5)
+		tex = Art.spark()
+		trail.default_color = Color(0.95, 0.90, 0.45, 0.55)
 	elif skill != null and (skill.tags & T.COLD) != 0:
-		sprite.texture = Art.frostbolt()
-		trail.default_color = Color(0.60, 0.85, 1.0, 0.5)
-	else:
-		sprite.texture = Art.fireball()
+		tex = Art.frostbolt()
+		trail.default_color = Color(0.60, 0.85, 1.0, 0.55)
+	elif skill != null and (skill.tags & T.CHAOS) != 0:
+		tex = Art.chaos_orb()
+		trail.default_color = Color(0.62, 0.90, 0.40, 0.55)
+	elif skill != null and (skill.tags & T.PHYSICAL) != 0:
+		tex = Art.knife()
+		trail.default_color = Color(0.85, 0.85, 0.90, 0.40)
+	Art.projectile_setup(sprite, tex)   # 32 像素能量弹缩到 16、线性过滤（ADR-037 补充）
 
 	body_entered.connect(_on_body_entered)
 
@@ -69,17 +81,41 @@ func _physics_process(delta: float) -> void:
 	if not is_zero_approx(turn):
 		direction = direction.rotated(turn)
 
-	# ② 飞
-	position += direction * state.spec.speed * delta
+	# ② 飞。★ 连锁中 +500% 速度 ★（ADR-035）—— 电弧跳向下一个目标几乎是瞬间的
+	var step := state.spec.speed * state.speed_multiplier() * delta
+	if _link_target != null and is_instance_valid(_link_target) and _link_target.stats.is_alive():
+		# 连锁追踪：朝目标此刻的位置飞；一步之内能到就直接贴上去（不然高速会穿过怪的碰撞圈）
+		var to_t := _link_target.global_position - global_position
+		if to_t.length() <= step + 2.0:
+			global_position = _link_target.global_position
+			_link_target = null
+			step = 0.0
+		else:
+			direction = to_t.normalized()
+	elif state.returning and caster != null and is_instance_valid(caster):
+		# 回旋：朝施法者飞，到了就消失
+		var to_c := caster.global_position - global_position
+		if to_c.length() <= step + 4.0:
+			queue_free()
+			return
+		direction = to_c.normalized()
+	position += direction * step
+	state.add_travel(step)
+	# 回旋：存活过半掉头（命中记录清空，回程能再打一遍）
+	if state.should_return(lifetime):
+		state.start_return()
+		trail.clear_points()
+	# 变形（冰矛第二形态）：亮一点、大一点，让玩家看得出"它变了"
+	if state.is_transformed() and sprite.scale.x < 1.4:
+		sprite.scale = Vector2(1.45, 1.45)
+		sprite.modulate = Color(1.3, 1.3, 1.6)
 
 	# ③ 撞墙反弹
 	_handle_bounds()
 
-	# ④ 表现：电球术指向飞行方向（乱窜时看着才对劲），火球自旋
-	if skill != null and (skill.tags & T.LIGHTNING) != 0:
-		sprite.rotation = direction.angle()
-	else:
-		sprite.rotation += delta * 12.0
+	# ④ 表现：能量弹都是圆的，统一慢慢自旋就行（闪电 / 飞刀转向飞行方向是老字符画时代的事，
+	#    32 像素能量弹转向反而会抖）
+	sprite.rotation += delta * 6.0
 
 	# 拖尾：记录最近几个位置。分叉/弹射/反弹的转折在这里看得最清楚
 	trail.add_point(global_position)
@@ -139,7 +175,12 @@ func _on_body_entered(body: Node2D) -> void:
 		return
 
 	# ---------- ① 结算伤害 ----------
-	var r := DamagePipeline.compute_hit(source, e.stats, skill, _rng)
+	# 变形后的冰矛暴击率翻倍：拿一份技能副本改暴击率再算（不动模板）
+	var hit_skill := skill
+	if not is_equal_approx(state.crit_multiplier(), 1.0):
+		hit_skill = skill.duplicate()
+		hit_skill.base_crit_chance = skill.base_crit_chance * state.crit_multiplier()
+	var r := DamagePipeline.compute_hit(source, e.stats, hit_skill, _rng)
 	e.take_hit(r)
 
 	# ---------- ② 附加技能自带的 Debuff（火球术 → 点燃，电球术 → 感电）----------
@@ -164,6 +205,9 @@ func _on_body_entered(body: Node2D) -> void:
 			behaviour.emit("fork", global_position)
 			_do_fork()
 
+		ProjectileState.Action.LINK:
+			_do_link()
+
 		ProjectileState.Action.CHAIN:
 			_do_chain()
 
@@ -184,11 +228,8 @@ func _do_fork() -> void:
 	queue_free()
 
 
-## 弹射（连锁）：转向下一个目标。
-##
-## "挑谁"的规则在 ProjectileState.pick_chain_target 里（纯逻辑，能单测），
-## 这里只负责把场景里的敌人整理成 [{id, dist}] 喂进去。
-func _do_chain() -> void:
+## 场景里活着的敌人 → [{id, dist}]（弹射 / 连锁挑目标共用）
+func _enemy_candidates() -> Array:
 	var candidates: Array = []
 	for n in get_tree().get_nodes_in_group(&"enemy"):
 		if not is_instance_valid(n):
@@ -200,8 +241,34 @@ func _do_chain() -> void:
 			"id": e.get_instance_id(),
 			"dist": global_position.distance_to(e.global_position),
 		})
+	return candidates
 
-	var next_id := state.pick_chain_target(candidates)
+
+## ★ 连锁（ADR-035）★：跳向一个**没打过**的目标，速度 +500%（speed_multiplier 在飞行里乘）。
+## 没有新目标 = 连锁到此为止，直接消失（不像弹射那样"白费次数直飞出去"—— 连锁的意义就是必有目标）。
+func _do_link() -> void:
+	var next_id := state.pick_link_target(_enemy_candidates())
+	if next_id == -1:
+		behaviour.emit("link_fail", global_position)
+		queue_free()
+		return
+	var target := instance_from_id(next_id) as Enemy
+	if target == null or not is_instance_valid(target):
+		queue_free()
+		return
+	behaviour.emit("link", global_position)
+	_link_target = target             # 之后每帧追它（见 _physics_process）
+	direction = (target.global_position - global_position).normalized()
+	lifetime = maxf(lifetime, 1.2)
+	trail.clear_points()
+
+
+## 弹射：转向下一个目标（可以弹回打过的）。
+##
+## "挑谁"的规则在 ProjectileState.pick_chain_target 里（纯逻辑，能单测），
+## 这里只负责把场景里的敌人整理成 [{id, dist}] 喂进去。
+func _do_chain() -> void:
+	var next_id := state.pick_chain_target(_enemy_candidates())
 	if next_id == -1:
 		# PoE 的行为：找不到目标就直飞出去消失，弹射次数白费
 		behaviour.emit("chain_fail", global_position)

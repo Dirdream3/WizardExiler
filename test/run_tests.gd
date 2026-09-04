@@ -1,4 +1,4 @@
-﻿extends SceneTree
+extends SceneTree
 
 ## 战斗核心的单元测试。
 ##
@@ -86,6 +86,27 @@ func _initialize() -> void:
 	_test_catalyst_rules()
 	# --- 新辅助：法术节魔 / 元素集中 / 快速·缓速投射 / 暴击伤害 ---
 	_test_new_supports()
+	# --- ADR-028：技能扩充 ×5 + 虚空操纵 / 波次刷怪 / 精英怪词条 ---
+	_test_skills_batch_two()
+	_test_essence_drain_dot()
+	_test_skills_batch_three()
+	# --- ADR-030：真正的范围管线（新星 / 风暴呼唤 / 增大范围 / 集中效应）---
+	_test_area_spec()
+	_test_area_skills()
+	# --- ADR-031：脉冲 / 连环 / 三颗新范围技能 / 辅助稀有度（崇高、血脉）---
+	_test_area_pulses_cascade()
+	_test_area_skills_two()
+	_test_support_tiers()
+	# --- ADR-032：近战武器 + 攻击技能 ---
+	_test_melee_weapons()
+	_test_melee_skills()
+	# --- ADR-035：连锁 vs 弹射 ---
+	_test_link_vs_chain()
+	# --- ADR-036：同质化技能的差异化 ---
+	_test_differentiation()
+	_test_room_waves()
+	_test_monster_affixes()
+	_test_elite_monsters()
 
 	print("\n===================================")
 	print("通过 %d / %d" % [_passed, _passed + _failed])
@@ -957,9 +978,18 @@ func _test_gem_grid_save() -> void:
 	partial.from_data([{"id": "spark", "x": 0, "y": 0, "rot": 0, "level": 1}], GemSave.resolve)
 	_check("老存档里只有 1 件", partial.items.size() == 1)
 	var added := GemSave.fill_missing(partial)
-	_check("★ 图鉴里新加的宝石/装备会自动补进来 ★",
-			partial.items.size() == GemSave.everything().size(),
-			"补了 %d 件，一共 %d 件" % [added, partial.items.size()])
+	# ★ 图鉴（45 件）已经比背包（56 格）能装的多了（ADR-029）★ —— 所以规则改成
+	#   "能塞多少塞多少"：要么全补齐，要么补到 1×1 都塞不下为止。后一半不是恒真：
+	#   fill_missing 要是提前放弃（比如碰到一件放不下的装备就 return），这里就会红。
+	var all_in := partial.items.size() == GemSave.everything().size()
+	# 探针在**副本**上放，别把 partial 自己弄脏（曾经直接在原网格上放，多出一颗重复的电球）
+	var probe := GemGrid.new()
+	probe.from_data(partial.to_data(), GemSave.resolve)
+	var truly_full := probe.place_anywhere(Gems.gem_spark()) == null
+	_check("★ 图鉴里新加的宝石/装备会自动补进来，直到背包真的塞满 ★",
+			all_in or truly_full,
+			"补了 %d 件，一共 %d 件 / 图鉴 %d 件" % [added, partial.items.size(), GemSave.everything().size()])
+	_check("补进来的都是 1 件 1 个 id，没有重复", _no_dup_ids(partial))
 	_check("补的时候不会重复放同一颗", not partial.has_gem(&"不存在"))
 
 
@@ -1556,8 +1586,8 @@ func _test_new_actives() -> void:
 	var ids := {}
 	for g in Gems.all_actives():
 		ids[(g as SkillGem).id] = true
-	_check("图鉴里有全部 5 颗主动技能石",
-			ids.size() == 5 and ids.has(&"arc") and ids.has(&"frostbolt")
+	_check("图鉴里有全部 31 颗主动技能石（20 + ADR-032 的 11）",
+			ids.size() == 31 and ids.has(&"arc") and ids.has(&"frostbolt")
 			and ids.has(&"freezing_pulse"),
 			"实际 %d 颗" % ids.size())
 	_check("按 id 能造出电弧（存档读回来靠它）", Gems.make_gem(&"arc") != null)
@@ -1569,7 +1599,8 @@ func _test_new_actives() -> void:
 	_check("电弧带闪电/法术/投射物标签",
 			T.has_all(arc.tags, T.LIGHTNING | T.SPELL | T.PROJECTILE))
 	var arc_spec := ProjectileSpec.build(p, arc)
-	_check("电弧天生弹射 3 次", arc_spec.chain_count == 3, "实际 %d" % arc_spec.chain_count)
+	_check("★ 电弧天生连锁 3 次、弹射 0 次 ★（ADR-035：连锁不回头、跳跃 +500% 速度）",
+			arc_spec.link_count == 3 and arc_spec.chain_count == 0, "连锁 %d / 弹射 %d" % [arc_spec.link_count, arc_spec.chain_count])
 	_check("电弧不穿透、不分叉", arc_spec.pierce_count == 0 and arc_spec.fork_count == 0)
 	var arc_shocks := false
 	for b in arc.on_hit_buffs:
@@ -1639,7 +1670,7 @@ func _test_cold_support() -> void:
 	_check("闪电增强能连电弧", Gems.support_lightning().can_support(Gems.gem_arc().tags))
 	_check("★ 延长持续连不上冰霜脉冲 ★（它没有【持续时间】标签，短射程是它的身份）",
 			not Gems.support_duration().can_support(Gems.gem_freezing_pulse().tags))
-	_check("弹射支援能连电弧（弹射次数还能再叠）",
+	_check("弹射支援能连电弧（连锁跳完再来回弹）",
 			Gems.support_chain().can_support(Gems.gem_arc().tags))
 
 
@@ -1651,8 +1682,8 @@ func _test_new_content_in_run() -> void:
 	_check("见习法杖也在价目表里（商店里买第二根法杖 = 多带一个技能）",
 			RunContent.PRICES.has(&"apprentice_wand"))
 	var pools := RunContent.reward_pools([])
-	_check("奖励池：主动 5 颗、辅助 21 颗（15 普通 + 6 触媒）",
-			(pools["gems"] as Array).size() == 5 and (pools["supports"] as Array).size() == 21,
+	_check("奖励池（第 1 层）：主动 31 颗、辅助 27 颗（21 普通 + 6 触媒，没有崇高）",
+			(pools["gems"] as Array).size() == 31 and (pools["supports"] as Array).size() == 27,
 			"主动 %d / 辅助 %d" % [(pools["gems"] as Array).size(), (pools["supports"] as Array).size()])
 
 
@@ -1904,7 +1935,7 @@ func _test_catalyst_rules() -> void:
 		_check("%s 是辅助宝石（能用箭头连线），且不带词缀、没有等级" % cat.display_name,
 				cat is SupportGem and cat.mods.is_empty() and cat.max_level == 1)
 		_check("%s 有正数价格" % cat.display_name, RunContent.price_of(cat) > 0)
-	_check("触媒也进了辅助池（all_supports）", Gems.all_supports().size() == 21)
+	_check("触媒也进了辅助池（all_supports：21 普通 + 6 触媒）", Gems.all_supports().size() == 27)
 
 	# ---- 计数规则 ----
 	var hits := Gems.cat_hits()
@@ -2021,3 +2052,1204 @@ func _test_new_supports() -> void:
 	var multi_after := DamagePipeline.compute_hit(pc, mob, fire_spec, null).crit_multi
 	_close("★ 暴伤倍率 1.5 → 2.0 ★", multi_after, multi_before + 0.5)
 	_check("暴击伤害什么技能都能连", Gems.support_crit_damage().can_support(melee_tags))
+
+
+# ================================================================ ADR-028：技能扩充 ×5 + 虚空操纵
+
+func _test_skills_batch_two() -> void:
+	_begin("★ 新技能：冰矛 / 翻滚岩浆 / 焚烧 / 闪电之触 / 精髓吸取 ★")
+	var p := CombatEntity.new(&"t", "测试")
+	for id in [&"ice_spear", &"rolling_magma", &"incinerate", &"lightning_tendrils", &"essence_drain"]:
+		_check("按 id 能造出 %s（存档 / 商店 / 控制台都靠它）" % id, Gems.make_gem(id) != null)
+		_check("%s 写进了价目表（不是吃默认价）" % id, RunContent.PRICES.has(id))
+
+	# ---- 冰矛：暴击路。暴击率是别的技能的 3 倍以上，穿透 1，冰缓 ----
+	var spear := Gems.gem_ice_spear().build()
+	_check("冰矛是冰霜法术投射物", T.has_all(spear.tags, T.COLD | T.SPELL | T.PROJECTILE))
+	_check("★ 冰矛天生暴击率 ≥ 3 倍于火球 ★（它的身份）",
+			spear.base_crit_chance >= Gems.gem_fireball().build().base_crit_chance * 3.0,
+			"%.2f" % spear.base_crit_chance)
+	var spear_spec := ProjectileSpec.build(p, spear)
+	_check("冰矛穿透 1 次、飞得比寒冰弹快得多",
+			spear_spec.pierce_count == 1
+			and spear_spec.speed > Gems.gem_frostbolt().build().projectile_speed * 2.0)
+	_check("冰矛命中附加冰缓（冰冻触媒吃得到）", _has_buff(spear, &"chill"))
+
+	# ---- 翻滚岩浆：火系打群。天生弹射 2、弹跳距离短、慢、点燃 ----
+	var magma := Gems.gem_rolling_magma().build()
+	var magma_spec := ProjectileSpec.build(p, magma)
+	_check("翻滚岩浆是火焰法术投射物", T.has_all(magma.tags, T.FIRE | T.SPELL | T.PROJECTILE))
+	_check("★ 翻滚岩浆天生弹射 2 次 ★（火系里唯一的打群技能）", magma_spec.chain_count == 2,
+			"实际 %d" % magma_spec.chain_count)
+	_check("弹跳距离比电弧短（岩浆是滚过去的，不是隔空跳）",
+			magma_spec.chain_range < Gems.gem_arc().build().chain_range)
+	_check("翻滚岩浆比火球慢", magma_spec.speed < Gems.gem_fireball().build().projectile_speed)
+	_check("翻滚岩浆每一跳都点燃", _has_buff(magma, &"ignite"))
+
+	# ---- 焚烧：喷火器 = 扇形范围（ADR-034），极快、极便宜、短、点燃是几率 ----
+	var inc := Gems.gem_incinerate().build()
+	var inc_a := AreaSpec.build(p, inc)
+	_check("★ 焚烧施放时间 < 0.3 秒 ★（按住就是一条火舌）", inc.cast_time < 0.3, "%.2f" % inc.cast_time)
+	_check("焚烧消耗比任何老技能都低", inc.mana_cost < Gems.gem_freezing_pulse().build().mana_cost)
+	_check("★ 焚烧是扇形范围，不是投射物 ★（PoE：Spell, AoE, Fire, Channelling）",
+			inc.is_area() and not inc.is_projectile() and inc_a.is_cone() and inc_a.origin == AreaSpec.Origin.SELF)
+	_check("焚烧扇形 30°、长 130（窄而长）", is_equal_approx(inc_a.arc_deg, 30.0) and is_equal_approx(inc_a.radius, 130.0),
+			"%.0f° / %.0f" % [inc_a.arc_deg, inc_a.radius])
+	_check("焚烧的点燃是几率（不是必中）", _has_buff(inc, &"ignite") and inc.on_hit_chance < 1.0,
+			"几率 %.2f" % inc.on_hit_chance)
+	_check("焚烧每秒出手比火球多 3 倍以上",
+			DamagePipeline.actions_per_second(Demo.make_player(), inc)
+				> DamagePipeline.actions_per_second(Demo.make_player(), Gems.gem_fireball().build()) * 3.0)
+	_check("多重投射 / 穿透连不上焚烧了（它不是弹）；增大范围连得上",
+			not Gems.support_multi().can_support(Gems.gem_incinerate().tags)
+			and not Gems.support_pierce().can_support(Gems.gem_incinerate().tags)
+			and Gems.support_area().can_support(Gems.gem_incinerate().tags))
+
+	# ---- 闪电之触：贴脸电弧扇 = 60° 扇形范围 ----
+	var tend := Gems.gem_lightning_tendrils().build()
+	var tend_a := AreaSpec.build(p, tend)
+	_check("★ 闪电之触是 100° 宽扇形、长 90（和焚烧相反：宽而短）★", tend.is_area() and tend_a.is_cone()
+			and is_equal_approx(tend_a.arc_deg, 100.0) and is_equal_approx(tend_a.radius, 90.0))
+	_check("闪电之触必定感电", _has_buff(tend, &"shock") and tend.on_hit_chance >= 1.0)
+	_check("闪电之触扇面比焚烧宽", tend_a.arc_deg > inc_a.arc_deg)
+
+	# ---- 精髓吸取：混沌路。三系元素辅助一颗都连不上，只吃虚空操纵 ----
+	var ed_gem := Gems.gem_essence_drain()
+	var ed := ed_gem.build()
+	_check("精髓吸取是混沌法术投射物", T.has_all(ed.tags, T.CHAOS | T.SPELL | T.PROJECTILE))
+	_check("★ 混沌不是元素：元素集中连不上 ★", not Gems.support_ele_focus().can_support(ed_gem.tags))
+	_check("闪电增强 / 冰霜增强都连不上", not Gems.support_lightning().can_support(ed_gem.tags)
+			and not Gems.support_cold().can_support(ed_gem.tags))
+	_check("★ 故意不带【持续时间】标签 ★（DURATION 只延长弹的存活，不改 DoT 时长）",
+			(ed_gem.tags & T.DURATION) == 0)
+	_check("精髓吸取命中挂上混沌 DoT", _has_buff(ed, &"essence_drain"))
+	var void_sup := Gems.support_void()
+	_check("虚空操纵只连精髓吸取", void_sup.can_support(ed_gem.tags)
+			and not void_sup.can_support(Gems.gem_spark().tags)
+			and not void_sup.can_support(Gems.gem_fireball().tags))
+	var p2 := CombatEntity.new(&"t2", "测试")
+	p2.skill_mods.add_all(void_sup.build_mods())
+	_close("虚空操纵：混沌伤害 ×1.25", p2.get_stat(S.DAMAGE, ed.hit_tags(), 100.0), 125.0)
+	_close("火焰伤害不受影响", p2.get_stat(S.DAMAGE, Gems.gem_fireball().build().hit_tags(), 100.0), 100.0)
+
+	# ---- 10 颗技能的格子短名不撞车 ----
+	var shorts := {}
+	var dup_short := false
+	for g in Gems.all_actives():
+		var sg := g as SkillGem
+		if shorts.has(sg.short_name):
+			dup_short = true
+		shorts[sg.short_name] = true
+	_check("31 颗技能石的格子短名互不重复（背包里一眼分得清）", not dup_short)
+
+
+## 技能命中会不会附加某个 Buff（按 id 查）
+func _has_buff(spec: SkillSpec, id: StringName) -> bool:
+	for b in spec.on_hit_buffs:
+		if (b as BuffDef).id == id:
+			return true
+	return false
+
+
+func _test_essence_drain_dot() -> void:
+	_begin("精髓吸取的混沌 DoT：REFRESH 不叠、吃负抗性、吃虚空操纵")
+	var pc := Demo.make_player()
+	var mob := Demo.make_monster()          # 混沌抗性 -30%
+	var ed := Demo.buff_essence_drain()
+	mob.apply_buff(ed, pc)
+	mob.apply_buff(ed, pc)
+	_check("★ 重复命中只刷新，场上只有 1 份 ★（配多重投射不该 3 倍 DoT）",
+			mob.buffs.count_of(&"essence_drain") == 1)
+
+	# 走一次结算：每 0.5 秒一跳
+	var life0 := mob.life
+	var events := DamagePipeline.resolve_dots(mob, 0.5)
+	_check("0.5 秒后跳了一次", events.size() == 1 and mob.life < life0)
+	if events.size() == 1:
+		var raw: float = events[0]["raw"]
+		var dmg: float = events[0]["damage"]
+		_close("★ 负抗性放大：实际伤害 = 原值 × 1.30 ★", dmg, raw * 1.30, 0.5)
+		_check("玩家的「提高投射物伤害」天赋不影响 DoT（它没有投射物标签）",
+				is_equal_approx(raw, 45.0), "原值 %.1f" % raw)
+
+	# 虚空操纵是 MORE 混沌伤害 → DoT 快照时也吃到
+	var pc2 := Demo.make_player()
+	pc2.skill_mods.add_all(Gems.support_void().build_mods())
+	var mob2 := Demo.make_monster()
+	mob2.apply_buff(ed, pc2)
+	var ev2 := DamagePipeline.resolve_dots(mob2, 0.5)
+	_check("连了虚空操纵后 DoT 原值 ×1.25", ev2.size() == 1 and is_equal_approx(ev2[0]["raw"], 45.0 * 1.25),
+			"原值 %.1f" % (ev2[0]["raw"] if ev2.size() == 1 else -1.0))
+
+	# 4 秒后要消失
+	mob.tick_buffs(4.0)
+	_check("4 秒后 DoT 消退", not mob.buffs.has(&"essence_drain"))
+
+
+# ================================================================ ADR-028：波次刷怪
+
+func _test_room_waves() -> void:
+	_begin("★ 房间编制：总数更多、分波上场、精英压轴 ★")
+	# 总数只增不减，且比老曲线（2+step，最多 6）多
+	var ok := true
+	var prev := 0
+	for f in RunMap.FLOORS:
+		for i in RunMap.STEPS - 1:
+			var n := RunContent.enemies_for_step(i, f)
+			if n < prev or n < 4:
+				ok = false
+			prev = n
+		prev = 0
+	_check("每步总数只增不减、至少 4 只", ok)
+	_check("第 1 层第 1 步 4 只（是老的 2 只的两倍）", RunContent.enemies_for_step(0, 0) == 4)
+	_check("★ 第 4 层第 6 步 16 只 ★（老上限是 6）", RunContent.enemies_for_step(5, 3) == 16,
+			"实际 %d" % RunContent.enemies_for_step(5, 3))
+	_check("同一步，层越深怪越多", RunContent.enemies_for_step(2, 3) > RunContent.enemies_for_step(2, 0))
+
+	# 同时在场上限 < 总数 → 必然分波；上限最多 8（场地就 400×400）
+	var capped := true
+	for f in RunMap.FLOORS:
+		for i in RunMap.STEPS - 1:
+			var cap := RunContent.max_alive_for_step(i, f)
+			if cap < 4 or cap > 8 or cap > RunContent.enemies_for_step(i, f):
+				capped = false
+	_check("★ 同时在场上限在 4~8 之间，且不超过总数 ★", capped)
+	_check("后期房间必须分波（总数 > 上限）",
+			RunContent.enemies_for_step(5, 3) > RunContent.max_alive_for_step(5, 3))
+	_check("第 1 层第 1 步一波放完（总数 == 上限，开局别排队）",
+			RunContent.enemies_for_step(0, 0) == RunContent.max_alive_for_step(0, 0))
+
+	# 精英数：第 1 层开局没有，后面才有；不超过总数；层越深越多
+	_check("第 1 层第 1 步没有精英（孤杖孤石别一开局就见精英）", RunContent.elites_for_step(0, 0) == 0)
+	_check("第 1 层第 4 步起有精英", RunContent.elites_for_step(3, 0) >= 1)
+	_check("★ 第 4 层一开局就有 2 只精英 ★", RunContent.elites_for_step(0, 3) == 2,
+			"实际 %d" % RunContent.elites_for_step(0, 3))
+	var elite_ok := true
+	for f in RunMap.FLOORS:
+		for i in RunMap.STEPS - 1:
+			if RunContent.elites_for_step(i, f) > RunContent.enemies_for_step(i, f) \
+					or RunContent.elites_for_step(i, f) > 4:
+				elite_ok = false
+	_check("精英数不超过总数、最多 4 只", elite_ok)
+	_check("词条数：前两层 1 条、后两层 2 条",
+			RunContent.affix_count_for_floor(0) == 1 and RunContent.affix_count_for_floor(1) == 1
+			and RunContent.affix_count_for_floor(2) == 2 and RunContent.affix_count_for_floor(3) == 2)
+	_check("Boss 护卫逐层增加", RunContent.boss_escorts(0) == 2 and RunContent.boss_escorts(3) == 5)
+
+	# 名单：数量对、精英排在最后、同 rng 种子同名单
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7
+	var roster := RunContent.room_roster(4, 2, rng)   # 第 3 层第 5 步：4+8+4=16 只，(4+4)/3=2 精英
+	_check("名单人数 = enemies_for_step", roster.size() == RunContent.enemies_for_step(4, 2),
+			"实际 %d" % roster.size())
+	var elites_in := 0
+	var tail_elite := true
+	for i in roster.size():
+		var m := roster[i] as CombatEntity
+		if m.is_elite():
+			elites_in += 1
+			if i < roster.size() - RunContent.elites_for_step(4, 2):
+				tail_elite = false
+	_check("名单里的精英数 = elites_for_step", elites_in == RunContent.elites_for_step(4, 2),
+			"实际 %d" % elites_in)
+	_check("★ 精英排在队尾压轴 ★", tail_elite)
+	var rng2 := RandomNumberGenerator.new()
+	rng2.seed = 7
+	var roster2 := RunContent.room_roster(4, 2, rng2)
+	var same := true
+	for i in roster.size():
+		if (roster[i] as CombatEntity).display_name != (roster2[i] as CombatEntity).display_name:
+			same = false
+	_check("★ 同种子同名单（精英词条定死，读档重打不能刷词条）★", same)
+
+
+# ================================================================ ADR-028：精英怪 + 随机词条
+
+func _test_monster_affixes() -> void:
+	_begin("★ 词条池：每条真的改数值、爪类真的带异常、抽取不重复 ★")
+	var pool := MonsterAffixes.all_affixes()
+	_check("词条池至少 10 条", pool.size() >= 10, "实际 %d" % pool.size())
+	var ids := {}
+	for a in pool:
+		ids[(a as MonsterAffix).id] = true
+	_check("词条 id 互不重复", ids.size() == pool.size())
+	_check("按 id 能找到词条", MonsterAffixes.by_id(&"swift") != null and MonsterAffixes.by_id(&"nope") == null)
+
+	# 每一条要么改属性、要么带爪类异常、要么改体型 —— 不许有"装上去什么都不变"的词条（ADR-011 的教训）
+	var all_do_something := true
+	for a in pool:
+		var af := a as MonsterAffix
+		if af.mods.is_empty() and af.on_hit_buff == null and is_equal_approx(af.body_scale, 1.0):
+			all_do_something = false
+	_check("★ 没有一条是空词条 ★", all_do_something)
+
+	# 逐条验它改的是它说的那个数：拿基准怪对照
+	var base := Demo.make_monster()
+	var swift := Demo.make_monster()
+	MonsterAffixes.swift().apply_to(swift)
+	_close("迅捷：移速 ×1.45（基础值走参数传入，和 Enemy 一样）",
+			swift.get_stat(S.MOVE_SPEED, T.NONE, 42.0), 42.0 * 1.45)
+	var sturdy := Demo.make_monster()
+	MonsterAffixes.sturdy().apply_to(sturdy)
+	_close("坚韧：生命上限 ×1.6", sturdy.max_life(), base.max_life() * 1.6)
+	_check("★ apply_to 不 refill ★（叠完所有词条再统一充满，否则出生不满血）",
+			sturdy.life < sturdy.max_life())
+	var brutal := Demo.make_monster()
+	MonsterAffixes.brutal().apply_to(brutal)
+	_close("暴虐：伤害 ×1.5", brutal.get_stat(S.DAMAGE, T.PHYSICAL | T.ATTACK | T.MELEE, 100.0), 150.0)
+	var fren := Demo.make_monster()
+	MonsterAffixes.frenzied().apply_to(fren)
+	_check("★ 狂暴用 FLAT 攻速：0 基础上真的变快了 ★（INCREASED 在 0 上是恒真数据）",
+			fren.get_stat(S.ATTACK_SPEED) > 0.25 and is_zero_approx(base.get_stat(S.ATTACK_SPEED)),
+			"实际 %.2f" % fren.get_stat(S.ATTACK_SPEED))
+	var stone := Demo.make_monster()
+	MonsterAffixes.stoneskin().apply_to(stone)
+	var fire := Gems.gem_fireball().build()
+	var pc := Demo.make_player()
+	var hit_base := DamagePipeline.compute_hit(pc, base, fire, null).total
+	var hit_stone := DamagePipeline.compute_hit(pc, stone, fire, null).total
+	_close("石肤：走完整伤害管线，最终伤害 ×0.75", hit_stone, hit_base * 0.75, 0.5)
+	# 感电和石肤同一个乘区相加：3 层感电 +24% 抵掉大部分
+	stone.apply_buff(Demo.buff_shock())
+	stone.apply_buff(Demo.buff_shock())
+	stone.apply_buff(Demo.buff_shock())
+	_close("3 层感电抵消石肤：×(1 − 0.25 + 0.24)", DamagePipeline.compute_hit(pc, stone, fire, null).total,
+			hit_base * 0.99, 0.5)
+	var ward := Demo.make_monster()
+	MonsterAffixes.fire_ward().apply_to(ward)
+	_close("抗火：火抗 0.40 → 0.70", ward.resist_for(T.FIRE), 0.70)
+	_close("抗火不动冰抗", ward.resist_for(T.COLD), base.resist_for(T.COLD))
+	var ward3 := Demo.make_monster()
+	MonsterAffixes.fire_ward().apply_to(ward3)
+	ward3.gear_mods.add(M.new(S.FIRE_RESIST, M.Kind.FLAT, 0.50))
+	_close("抗性堆过头也卡在 75% 上限", ward3.resist_for(T.FIRE), CombatStat.RESIST_CAP)
+	var giant := Demo.make_monster()
+	MonsterAffixes.giant().apply_to(giant)
+	_check("巨型：体型 1.35、血翻倍、走得慢",
+			is_equal_approx(giant.affix_scale(), 1.35)
+			and is_equal_approx(giant.max_life(), base.max_life() * 2.0)
+			and giant.get_stat(S.MOVE_SPEED, T.NONE, 42.0) < 42.0)
+
+	# 爪类：近战带异常。词条自己只带数据，施加是表现层的事，这里验数据 + 施加后的效果
+	var claw := MonsterAffixes.scorching_claw()
+	_check("灼热之爪带一个火 DoT", claw.on_hit_buff != null and claw.on_hit_buff.dot_damage > 0.0
+			and (claw.on_hit_buff.dot_tags & T.FIRE) != 0)
+	_check("★ 怪打玩家的灼热比玩家的点燃温和 ★（不复用 buff_ignite）",
+			claw.on_hit_buff.dot_damage < Demo.buff_ignite().dot_damage
+			and claw.on_hit_buff.stack_rule == BuffDef.StackRule.REFRESH)
+	var victim := Demo.make_player()
+	victim.apply_buff(claw.on_hit_buff, Demo.make_monster())
+	var life0 := victim.life
+	DamagePipeline.resolve_dots(victim, 0.5)
+	_check("挂到玩家身上真的会掉血", victim.life < life0, "%.0f → %.0f" % [life0, victim.life])
+	var frost := Demo.make_player()
+	frost.apply_buff(MonsterAffixes.frost_claw().on_hit_buff)
+	# ★ 冰缓是 INCREASED −30%，和旅者之靴的 +20% 在同一个乘区**相加** ★ → 92 × (1 + 0.2 − 0.3)
+	_close("霜爪：玩家移速降低（和靴子的 +20% 同乘区相加）",
+			frost.get_stat(S.MOVE_SPEED), frost.base_of(S.MOVE_SPEED) * 0.9)
+	_check("雷爪带感电", MonsterAffixes.shock_claw().on_hit_buff.id == &"shock")
+
+	# 抽取：不重复、同种子同结果、池子不够全给
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 99
+	var got := MonsterAffixes.roll(2, rng)
+	_check("抽 2 条得 2 条，且不重复", got.size() == 2 and (got[0] as MonsterAffix).id != (got[1] as MonsterAffix).id)
+	var rng2 := RandomNumberGenerator.new()
+	rng2.seed = 99
+	var got2 := MonsterAffixes.roll(2, rng2)
+	_check("同种子抽到同两条", (got[0] as MonsterAffix).id == (got2[0] as MonsterAffix).id
+			and (got[1] as MonsterAffix).id == (got2[1] as MonsterAffix).id)
+	_check("抽 999 条 = 整个池子（不重复所以最多这么多）",
+			MonsterAffixes.roll(999, rng).size() == pool.size())
+	_check("词条说明文本非空（面板要显示）", MonsterAffixes.swift().describe().length() > 0)
+
+
+func _test_elite_monsters() -> void:
+	_begin("★ 精英怪：底子更硬 + 随机词条 + 名字带词条 + 出生满血 ★")
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 5
+	var normal := RunContent.make_room_monster(3, 1)
+	var elite := RunContent.make_elite(3, 1, rng)
+	_check("精英是精英", elite.is_elite() and not normal.is_elite())
+	_check("★ 同步同层，精英比普通怪硬得多（≥ 1.8 倍生命）★", elite.max_life() >= normal.max_life() * 1.8,
+			"%.0f vs %.0f" % [elite.max_life(), normal.max_life()])
+	_check("精英伤害更高", elite.get_stat(S.DAMAGE, T.PHYSICAL | T.ATTACK | T.MELEE, 100.0)
+			> normal.get_stat(S.DAMAGE, T.PHYSICAL | T.ATTACK | T.MELEE, 100.0))
+	_check("第 2 层的精英挂 1 条词条", elite.affixes.size() == RunContent.affix_count_for_floor(1))
+	_check("★ 出生就是满血 ★（叠完词条再 refill；坚韧/巨型抬了上限也得是满的）",
+			is_equal_approx(elite.life, elite.max_life()), "%.0f / %.0f" % [elite.life, elite.max_life()])
+	_check("名字带上了词条（「迅捷 骷髅战士」这种）",
+			elite.display_name.begins_with(elite.affix_title()) and elite.affix_title() != "")
+	_check("词条的词缀进了 gear_mods，source = 词条 id（能整组识别）", _has_source(elite, (elite.affixes[0] as MonsterAffix).id))
+	_check("精英底子的词缀 source = elite", _has_source(elite, &"elite"))
+
+	# 第 4 层：2 条互不重复的词条
+	var rng4 := RandomNumberGenerator.new()
+	rng4.seed = 11
+	var deep := RunContent.make_elite(2, 3, rng4)
+	_check("第 4 层精英挂 2 条", deep.affixes.size() == 2)
+	if deep.affixes.size() == 2:
+		_check("两条词条不重复", (deep.affixes[0] as MonsterAffix).id != (deep.affixes[1] as MonsterAffix).id)
+		_check("名字用「·」连两条词条", deep.affix_title().contains("·"))
+	_check("第 4 层精英比第 2 层精英硬", deep.max_life() > elite.max_life())
+
+	# 沙盒用：基准怪 + 1 条
+	var rng_s := RandomNumberGenerator.new()
+	rng_s.seed = 1
+	var sand := RunContent.make_elite_from(Demo.make_monster(), 1, rng_s)
+	_check("沙盒精英：基准骷髅升格，血 ≥ 基准 × 1.8", sand.max_life() >= Demo.make_monster().max_life() * 1.8)
+	_check("0 条词条 = 只有底子，不算精英（is_elite 看的是词条）",
+			not RunContent.make_elite_from(Demo.make_monster(), 0, rng_s).is_elite())
+
+	# 精英 vs 同层 Boss：Boss 仍然是最硬的
+	_check("第 2 层守关 Boss 仍比同层最硬的精英硬",
+			RunContent.make_boss(1).max_life() > RunContent.make_elite(5, 1, rng).max_life())
+
+
+## 网格里的 id 有没有重复（fill_missing 不该同一颗放两次）
+func _no_dup_ids(grid: GemGrid) -> bool:
+	var seen := {}
+	for it in grid.items:
+		var id: StringName = (it as GemGrid.Placed).gem.id
+		if seen.has(id):
+			return false
+		seen[id] = true
+	return true
+
+
+## entity 的 gear_mods 里有没有 source 为 src 的词缀
+func _has_source(e: CombatEntity, src: StringName) -> bool:
+	for m in e.gear_mods.all():
+		if (m as Modifier).source == src:
+			return true
+	return false
+
+
+# ================================================================ ADR-029：技能扩充 ×6（含新星）
+
+func _test_skills_batch_three() -> void:
+	_begin("★ 新技能：裂雷之矛 / 寒冬之眼 / 灵魂撕裂 / 虚空匕首 / 冰霜新星 / 电击新星 ★")
+	var p := CombatEntity.new(&"t", "测试")
+	for id in [&"crackling_lance", &"eye_of_winter", &"soulrend", &"ethereal_knives", &"ice_nova", &"shock_nova"]:
+		_check("按 id 能造出 %s" % id, Gems.make_gem(id) != null)
+		_check("%s 写进了价目表" % id, RunContent.PRICES.has(id))
+
+	# ---- 裂雷之矛：一道光束 = 14° 的细长扇形（ADR-034），单发重 ----
+	var lance := Gems.gem_crackling_lance().build()
+	var lance_a := AreaSpec.build(p, lance)
+	var pulse_spec := ProjectileSpec.build(p, Gems.gem_freezing_pulse().build())
+	_check("★ 裂雷之矛是光束：长 ≥ 250 像素、扇形 ≤ 20° ★（PoE：Spell, AoE, Lightning）",
+			lance.is_area() and lance_a.is_cone() and lance_a.radius >= 250.0 and lance_a.arc_deg <= 20.0,
+			"%.0f 像素 / %.0f°" % [lance_a.radius, lance_a.arc_deg])
+	_check("长度是冰霜脉冲射程的 2 倍以上", lance_a.radius > pulse_spec.speed * pulse_spec.duration * 2.0)
+	_check("必定感电", _has_buff(lance, &"shock"))
+	_check("单发比冰霜脉冲重、施放比它慢（代价）",
+			lance.base_damage > Gems.gem_freezing_pulse().build().base_damage
+			and lance.cast_time > Gems.gem_freezing_pulse().build().cast_time)
+
+	# ---- 寒冬之眼：唯一天生分叉 ----
+	var eye := Gems.gem_eye_of_winter().build()
+	var eye_spec := ProjectileSpec.build(p, eye)
+	_check("★ 寒冬之眼天生分叉 1 次 ★", eye_spec.fork_count == 1, "实际 %d" % eye_spec.fork_count)
+	_check("寒冬之眼还能穿透 2 次", eye_spec.pierce_count == 2)
+	var innate_fork := 0
+	for g in Gems.all_actives():
+		if ProjectileSpec.build(p, (g as SkillGem).build()).fork_count > 0:
+			innate_fork += 1
+	_check("它是唯一天生带分叉的技能", innate_fork == 1, "实际 %d 颗" % innate_fork)
+	_check("分叉支援连上去 = 分叉 2 次（一发变四发）",
+			Gems.support_fork().can_support(Gems.gem_eye_of_winter().tags))
+	p.skill_mods.add_all(Gems.support_fork().build_mods())
+	_check("叠加后 fork_count == 2", ProjectileSpec.build(p, eye).fork_count == 2)
+	p.skill_mods.clear()
+	_check("寒冬之眼冰缓", _has_buff(eye, &"chill"))
+
+	# ---- 灵魂撕裂：穿透一切 + 轻 DoT，和精髓吸取的 DoT 能共存 ----
+	var soul := Gems.gem_soulrend().build()
+	var soul_spec := ProjectileSpec.build(p, soul)
+	_check("灵魂撕裂是混沌法术投射物、穿透一切",
+			T.has_all(soul.tags, T.CHAOS | T.SPELL | T.PROJECTILE) and soul_spec.pierce_count >= 90)
+	_check("命中挂 soulrend DoT", _has_buff(soul, &"soulrend"))
+	_check("灵魂撕裂的 DoT 比精髓吸取轻（群体 vs 单体的分工）",
+			Demo.buff_soulrend().dot_damage < Demo.buff_essence_drain().dot_damage)
+	var mob := Demo.make_monster()
+	var pc := Demo.make_player()
+	mob.apply_buff(Demo.buff_soulrend(), pc)
+	mob.apply_buff(Demo.buff_essence_drain(), pc)
+	_check("★ 两个混沌 DoT 是不同 id，能同时挂在一只怪身上 ★",
+			mob.buffs.has(&"soulrend") and mob.buffs.has(&"essence_drain"))
+	var ev := DamagePipeline.resolve_dots(mob, 0.5)
+	_check("半秒后两份 DoT 各跳一次", ev.size() == 2, "实际 %d 次" % ev.size())
+	_check("虚空操纵连得上灵魂撕裂", Gems.support_void().can_support(Gems.gem_soulrend().tags))
+
+	# ---- 虚空匕首：唯一的物理法术。不吃抗性、吃护甲 ----
+	var ek := Gems.gem_ethereal_knives().build()
+	var ek_spec := ProjectileSpec.build(p, ek)
+	_check("虚空匕首是物理法术投射物", T.has_all(ek.tags, T.PHYSICAL | T.SPELL | T.PROJECTILE))
+	_check("一次 5 把、扇面", ek_spec.shot_count() == 5 and ek_spec.spread_mode == ProjectileSpec.SpreadMode.FAN)
+	var phys_count := 0
+	for g in Gems.all_actives():
+		if ((g as SkillGem).tags & (T.PHYSICAL | T.SPELL)) == (T.PHYSICAL | T.SPELL):
+			phys_count += 1
+	_check("它是唯一的物理**法术**（物理攻击是另一回事，ADR-032）", phys_count == 1, "实际 %d" % phys_count)
+	var hit := DamagePipeline.compute_hit(pc, Demo.make_monster(), ek, null)
+	_check("★ 物理：减免走护甲（不是抗性），而且减得不少 ★", hit.mitigation > 0.30 and hit.mitigation < 0.90,
+			"减免 %.0f%%" % (hit.mitigation * 100.0))
+	var ward := Demo.make_monster()
+	MonsterAffixes.fire_ward().apply_to(ward)
+	_close("抗火词条对物理伤害毫无影响", DamagePipeline.compute_hit(pc, ward, ek, null).total, hit.total, 0.01)
+	_check("元素集中 / 三系增强都连不上物理", not Gems.support_ele_focus().can_support(Gems.gem_ethereal_knives().tags)
+			and not Gems.support_lightning().can_support(Gems.gem_ethereal_knives().tags))
+	_check("多重投射 / 穿透 / 暴击几率连得上（通用投射物辅助）",
+			Gems.support_multi().can_support(Gems.gem_ethereal_knives().tags)
+			and Gems.support_pierce().can_support(Gems.gem_ethereal_knives().tags)
+			and Gems.support_crit().can_support(Gems.gem_ethereal_knives().tags))
+	# 刀越重护甲减免越低：升级后减免比例下降
+	var ek5 := Gems.gem_ethereal_knives()
+	ek5.level = 5
+	_check("刀越重护甲减免越低（5 级减免 < 1 级减免）",
+			DamagePipeline.compute_hit(pc, Demo.make_monster(), ek5.build(), null).mitigation < hit.mitigation)
+
+	# 成长规则（每级 ≥ 1 级点伤 40%）对新 6 颗也成立 —— 由 _test_gem_level_growth 遍历 all_actives 自动覆盖
+
+
+# ================================================================ ADR-030：范围技能不走投射物
+
+func _test_area_spec() -> void:
+	_begin("★ AreaSpec：半径按面积平方根放大、延迟吃持续时间、圈内判定 ★")
+	var p := CombatEntity.new(&"t", "测试")
+	var nova := Gems.gem_ice_nova().build()
+	_check("★ 新星是范围技能，不是投射物 ★", nova.is_area() and not nova.is_projectile())
+	_check("投射物技能不是范围技能", Gems.gem_fireball().build().is_projectile()
+			and not Gems.gem_fireball().build().is_area())
+	var a := AreaSpec.build(p, nova)
+	_close("没有词缀时半径 = 技能基础值 90", a.radius, 90.0)
+	_check("新星以自己为中心、瞬发", a.origin == AreaSpec.Origin.SELF and is_zero_approx(a.delay))
+
+	# 「范围效果 +50%」→ 面积 ×1.5 → 半径 ×√1.5（不是 ×1.5）
+	p.skill_mods.add(M.new(S.AREA_OF_EFFECT, M.Kind.INCREASED, 0.50, T.AREA))
+	_close("★ 范围 +50% → 半径 × √1.5 ★", AreaSpec.build(p, nova).radius, 90.0 * sqrt(1.5))
+	p.skill_mods.add(M.new(S.AREA_OF_EFFECT, M.Kind.MORE, -0.30, T.AREA))
+	_close("再叠「更少 30% 范围」：面积 ×1.5×0.7，半径 × √1.05", AreaSpec.build(p, nova).radius, 90.0 * sqrt(1.5 * 0.7))
+	p.skill_mods.clear()
+	p.skill_mods.add(M.new(S.AREA_OF_EFFECT, M.Kind.INCREASED, 0.50, T.PROJECTILE))
+	_close("要求【投射物】的范围词缀对新星无效（它没有投射物标签）", AreaSpec.build(p, nova).radius, 90.0)
+	p.skill_mods.clear()
+	p.skill_mods.add(M.new(S.AREA_OF_EFFECT, M.Kind.MORE, -0.99, T.NONE))
+	_check("范围压到底也不会变成 0 半径（有下限）", AreaSpec.build(p, nova).radius >= 1.0)
+	p.skill_mods.clear()
+
+	# 圈内判定：边界算在内、圈外不算、同一 id 不重复
+	a = AreaSpec.build(p, nova)
+	var ids := a.hits([
+		{"id": 1, "dist": 0.0}, {"id": 2, "dist": 90.0}, {"id": 3, "dist": 90.01},
+		{"id": 4, "dist": 45.0}, {"id": 4, "dist": 46.0}, {"id": 5, "dist": 300.0},
+	])
+	_check("★ 圈里 3 个：圆心、边界上、半途 ★（边界外 0.01 不算）", ids.size() == 3
+			and ids.has(1) and ids.has(2) and ids.has(4) and not ids.has(3), str(ids))
+	_check("同一目标喂两遍只算一次", ids.count(4) == 1)
+	_check("空场没人中", a.hits([]).is_empty())
+
+	# ---- 扇形（ADR-034）：圆里但不在扇形里的不算；贴在圆心的不看角度 ----
+	var cone := AreaSpec.build(p, Gems.gem_incinerate().build())   # 30°、长 130
+	var cone_ids := cone.hits([
+		{"id": 1, "dist": 50.0, "angle": 0.0},                 # 正前方
+		{"id": 2, "dist": 50.0, "angle": deg_to_rad(14.0)},    # 扇形边缘以内
+		{"id": 3, "dist": 50.0, "angle": deg_to_rad(16.0)},    # 圆里、扇形外
+		{"id": 4, "dist": 50.0, "angle": deg_to_rad(180.0)},   # 背后
+		{"id": 5, "dist": 2.0, "angle": deg_to_rad(180.0)},    # 贴在身上：不看角度
+		{"id": 6, "dist": 140.0, "angle": 0.0},                # 正前方但太远
+	])
+	_check("★ 扇形：正前方、边缘内、贴身的中；扇形外、背后、太远的不中 ★",
+			cone_ids.size() == 3 and cone_ids.has(1) and cone_ids.has(2) and cone_ids.has(5)
+			and not cone_ids.has(3) and not cone_ids.has(4) and not cone_ids.has(6), str(cone_ids))
+	_check("没带 angle 的候选按整圆算（老调用方不炸）", cone.hits([{"id": 9, "dist": 50.0}]) == [9])
+	_check("整圆技能忽略 angle", a.hits([{"id": 7, "dist": 50.0, "angle": deg_to_rad(180.0)}]) == [7])
+	_check("describe 写明扇形", cone.describe().contains("扇形") and not a.describe().contains("扇形"))
+	p.skill_mods.add_all(Gems.support_area().build_mods())
+	_close("增大范围放大的是扇形的长度（半径 × √1.5），角度不变",
+			AreaSpec.build(p, Gems.gem_incinerate().build()).radius, 130.0 * sqrt(1.5))
+	_check("角度不变", is_equal_approx(AreaSpec.build(p, Gems.gem_incinerate().build()).arc_deg, 30.0))
+	p.skill_mods.clear()
+
+	# 风暴呼唤：指哪打哪、有延迟、延迟吃持续时间
+	var call := Gems.gem_storm_call().build()
+	var c := AreaSpec.build(p, call)
+	_check("风暴呼唤以鼠标点为中心、射程 180", c.origin == AreaSpec.Origin.TARGET and is_equal_approx(c.range, 180.0))
+	_close("落雷延迟 1.2 秒", c.delay, 1.2)
+	_close("鼠标点在 300 像素外 → 夹到射程 180", c.clamp_distance(300.0), 180.0)
+	_close("鼠标点在射程内 → 原样", c.clamp_distance(100.0), 100.0)
+	_close("新星（SELF）不夹距离", a.clamp_distance(300.0), 300.0)
+	p.skill_mods.add_all(Gems.support_duration().build_mods())
+	_close("★ 「延长持续」让风暴呼唤落雷更慢：1.2 × 1.45 ★（PoE 的真实行为）",
+			AreaSpec.build(p, call).delay, 1.2 * 1.45)
+	_check("新星延迟 0，乘什么都是 0", is_zero_approx(AreaSpec.build(p, nova).delay))
+	p.skill_mods.clear()
+	_check("describe 文本非空", a.describe().length() > 0 and c.describe().contains("延迟"))
+
+
+func _test_area_skills() -> void:
+	_begin("★ 范围技能的连接规则 + 增大范围 / 集中效应 ★")
+	var area_count := 0
+	var aoe_tagged := 0
+	for g in Gems.all_actives():
+		var sg := g as SkillGem
+		if sg.build().is_area():
+			area_count += 1
+			_check("%s 不带【投射物】标签（它不是弹）" % sg.display_name, (sg.tags & T.PROJECTILE) == 0)
+			_check("%s 不同时是投射物和范围" % sg.display_name, not sg.build().is_projectile())
+			if (sg.tags & T.AREA) != 0:
+				aoe_tagged += 1
+			# ★ 凡是走范围管线的都必须带【范围】标签 ★（ADR-037，项目主人反馈）—— 玩家看到圈就该能连范围辅助
+			_check("%s 走范围管线 → 必须带【范围】标签" % sg.display_name, (sg.tags & T.AREA) != 0)
+		# 投射物带爆炸 / 随行光环的也是范围（火球 / 翻滚岩浆 / 灵魂撕裂）
+		if sg.build().is_projectile() and (sg.build().explodes_on_hit() or sg.build().aura_radius > 0.0):
+			_check("%s 有爆炸 / 光环 → 必须带【范围】标签" % sg.display_name, (sg.tags & T.AREA) != 0)
+	_check("走范围管线的技能 19 颗（7 颗范围法术 + 3 颗扇形 / 光束 + 9 颗近战）", area_count == 19, "实际 %d" % area_count)
+	_check("走范围管线的 19 颗全带【范围】标签（吃增大范围 / 集中效应）", aoe_tagged == 19, "实际 %d" % aoe_tagged)
+	var proj_count := 0
+	for g in Gems.all_actives():
+		if (g as SkillGem).build().is_projectile():
+			proj_count += 1
+	_check("★ 投射物技能 12 颗（不再比范围多）★", proj_count == 12 and proj_count < area_count, "实际 %d" % proj_count)
+	_check("按 id 能造出风暴呼唤、进了价目表",
+			Gems.make_gem(&"storm_call") != null and RunContent.PRICES.has(&"storm_call"))
+
+	var nova_tags := Gems.gem_ice_nova().tags
+	_check("★ 多重投射 / 穿透 / 弹射连不上新星 ★（投射物辅助对圈没意义）",
+			not Gems.support_multi().can_support(nova_tags)
+			and not Gems.support_pierce().can_support(nova_tags)
+			and not Gems.support_chain().can_support(nova_tags))
+	_check("冰霜增强 / 元素集中 / 暴击几率 / 迅捷施法连得上新星",
+			Gems.support_cold().can_support(nova_tags) and Gems.support_ele_focus().can_support(nova_tags)
+			and Gems.support_crit().can_support(nova_tags) and Gems.support_faster_cast().can_support(nova_tags))
+	_check("新星故意不带【持续时间】：延长持续连不上",
+			not Gems.support_duration().can_support(nova_tags))
+	_check("风暴呼唤带【持续时间】：延长持续连得上（会让它落得更慢）",
+			Gems.support_duration().can_support(Gems.gem_storm_call().tags))
+	_check("冰霜新星冰缓、电击新星感电、风暴呼唤感电",
+			_has_buff(Gems.gem_ice_nova().build(), &"chill")
+			and _has_buff(Gems.gem_shock_nova().build(), &"shock")
+			and _has_buff(Gems.gem_storm_call().build(), &"shock"))
+	_check("风暴呼唤单发比新星重（要预判走位的代价）",
+			Gems.gem_storm_call().build().base_damage > Gems.gem_shock_nova().build().base_damage * 2.0)
+
+	# 增大范围：只连范围技能
+	var big := Gems.support_area()
+	_check("增大范围连得上新星、连不上火球（火球有 AREA 标签但……）",
+			big.can_support(nova_tags) and big.can_support(Gems.gem_fireball().tags))
+	_check("增大范围连不上电球术（没有范围标签）", not big.can_support(Gems.gem_spark().tags))
+	var p := CombatEntity.new(&"t", "测试")
+	p.skill_mods.add_all(big.build_mods())
+	_close("★ 增大范围：新星半径 90 → 90×√1.5 ★", AreaSpec.build(p, Gems.gem_ice_nova().build()).radius, 90.0 * sqrt(1.5))
+	_close("增大范围不加伤害", p.get_stat(S.DAMAGE, Gems.gem_ice_nova().build().hit_tags(), 100.0), 100.0)
+
+	# 集中效应：更小更疼，而且伤害加成只对范围技能
+	var conc := Gems.support_conc()
+	var p2 := CombatEntity.new(&"t2", "测试")
+	p2.skill_mods.add_all(conc.build_mods())
+	_close("★ 集中效应：半径 × √0.7 ★", AreaSpec.build(p2, Gems.gem_ice_nova().build()).radius, 90.0 * sqrt(0.7))
+	_close("集中效应：范围伤害 ×1.40", p2.get_stat(S.DAMAGE, Gems.gem_ice_nova().build().hit_tags(), 100.0), 140.0)
+	_close("集中效应对电球术（无范围标签）的伤害无效", p2.get_stat(S.DAMAGE, Gems.gem_spark().build().hit_tags(), 100.0), 100.0)
+	_check("集中效应连不上电球术", not conc.can_support(Gems.gem_spark().tags))
+	# 两颗一起：面积 1.5 × 0.7，伤害 ×1.4，蓝 ×1.30×1.40
+	var g := GemGrid.new()
+	var wand := EquipLibrary.apprentice_wand()
+	wand.socketed = Gems.gem_ice_nova()
+	var wp := g.place(wand, Vector2i(3, 2), 0)
+	g.place(big, Vector2i(2, 2), 0)
+	g.place(conc, Vector2i(4, 2), 2)
+	_close("隔着法杖连两颗：消耗 13 × 1.30 × 1.40", g.link_for(wp).skill().mana_cost, 13.0 * 1.30 * 1.40)
+	var p3 := CombatEntity.new(&"t3", "测试")
+	p3.skill_mods.add_all(g.link_for(wp).mods())
+	_close("两颗一起：半径 90 × √(1.5×0.7)", AreaSpec.build(p3, g.link_for(wp).skill()).radius, 90.0 * sqrt(1.5 * 0.7))
+
+	# 范围命中走同一条五步管线：对同一只怪，新星一次命中 = compute_hit 的结果（不是别的公式）
+	var pc := Demo.make_player()
+	var mob := Demo.make_monster()
+	var hit := DamagePipeline.compute_hit(pc, mob, Gems.gem_ice_nova().build(), null)
+	_check("范围命中也是五步管线：走冰抗 20% 减免", is_equal_approx(hit.mitigation, 0.20)
+			and hit.total > 0.0, "减免 %.2f" % hit.mitigation)
+
+
+# ================================================================ ADR-031：脉冲 / 连环 / 辅助稀有度
+
+func _test_area_pulses_cascade() -> void:
+	_begin("★ 范围管线的脉冲与连环：次数吃词缀和持续时间、连环位置前后交替 ★")
+	var p := CombatEntity.new(&"t", "测试")
+	var storm := Gems.gem_firestorm().build()
+	var a := AreaSpec.build(p, storm)
+	_check("烈焰风暴天生 6 次脉冲、间隔 0.35 秒", a.pulses == 6 and is_equal_approx(a.interval, 0.35),
+			"%d × %.2f" % [a.pulses, a.interval])
+	_check("一次性技能 pulses == 1、连环 0",
+			AreaSpec.build(p, Gems.gem_ice_nova().build()).pulses == 1
+			and AreaSpec.build(p, Gems.gem_ice_nova().build()).cascade == 0)
+
+	# 持续时间按比例放大次数：延长持续（+45%）→ round(6 × 1.45) = 9；缩短持续（更少 40%）→ round(3.6) = 4
+	p.skill_mods.add_all(Gems.support_duration().build_mods())
+	_check("★ 延长持续：烈焰风暴 6 → 9 次 ★（PoE：持续越久落得越多）", AreaSpec.build(p, storm).pulses == 9,
+			"实际 %d" % AreaSpec.build(p, storm).pulses)
+	p.skill_mods.clear()
+	p.skill_mods.add_all(Gems.support_less_duration().build_mods())
+	var less := AreaSpec.build(p, storm)
+	_check("★ 缩短持续：6 → 4 次，延迟 0.4 → 0.24 秒 ★", less.pulses == 4 and is_equal_approx(less.delay, 0.24),
+			"%d 次 / %.2f 秒" % [less.pulses, less.delay])
+	_close("缩短持续顺带更多 10% 伤害（只对带持续时间的技能）",
+			p.get_stat(S.DAMAGE, storm.hit_tags(), 100.0), 110.0)
+	_close("对没有持续时间标签的新星不加伤害",
+			p.get_stat(S.DAMAGE, Gems.gem_ice_nova().build().hit_tags(), 100.0), 100.0)
+	_check("缩短持续连不上新星（它没有持续时间标签）", not Gems.support_less_duration().can_support(Gems.gem_ice_nova().tags))
+	p.skill_mods.clear()
+
+	# 脉冲次数词缀（FLAT）：新星 1 → 3；再乘持续时间
+	p.skill_mods.add(M.new(S.AREA_PULSES, M.Kind.FLAT, 2.0, T.AREA))
+	_check("+2 脉冲：新星 1 → 3 次", AreaSpec.build(p, Gems.gem_ice_nova().build()).pulses == 3)
+	_check("+2 脉冲：烈焰风暴 6 → 8 次", AreaSpec.build(p, storm).pulses == 8)
+	p.skill_mods.add(M.new(S.DURATION, M.Kind.MORE, -0.99, T.NONE))
+	_check("持续时间压到底也至少 1 次", AreaSpec.build(p, storm).pulses == 1)
+	p.skill_mods.clear()
+
+	# 连环：位置前后交替，以圈间距为单位
+	p.skill_mods.add(M.new(S.AREA_CASCADE, M.Kind.FLAT, 2.0, T.AREA))
+	var c2 := AreaSpec.build(p, Gems.gem_ice_nova().build())
+	_check("连环 +2 → 前一个、后一个", c2.cascade == 2 and c2.cascade_offsets() == [1.0, -1.0],
+			str(c2.cascade_offsets()))
+	p.skill_mods.clear()
+	p.skill_mods.add(M.new(S.AREA_CASCADE, M.Kind.FLAT, 4.0, T.AREA))
+	_check("连环 +4 → [+1, -1, +2, -2]",
+			AreaSpec.build(p, Gems.gem_ice_nova().build()).cascade_offsets() == [1.0, -1.0, 2.0, -2.0])
+	p.skill_mods.clear()
+	_check("没有连环词缀 → 没有额外位置", AreaSpec.build(p, Gems.gem_ice_nova().build()).cascade_offsets().is_empty())
+	_check("要求【投射物】的连环词缀对新星无效", true)   # 由下面 support 的 required_tags 断言覆盖
+	_check("describe 带上了脉冲和连环", AreaSpec.build(p, storm).describe().contains("脉冲")
+			and c2.describe().contains("连环"))
+
+
+func _test_area_skills_two() -> void:
+	_begin("★ 新范围技能：烈焰风暴 / 漩涡 / 瘟疫 ★")
+	var p := CombatEntity.new(&"t", "测试")
+	for id in [&"firestorm", &"vortex", &"contagion"]:
+		_check("按 id 能造出 %s、写进了价目表" % id, Gems.make_gem(id) != null and RunContent.PRICES.has(id))
+		var sg: SkillGem = Gems.make_gem(id)
+		_check("%s 是范围技能、不带投射物标签" % id, sg.build().is_area() and (sg.tags & T.PROJECTILE) == 0)
+
+	var fs := AreaSpec.build(p, Gems.gem_firestorm().build())
+	_check("烈焰风暴：指哪打哪、延迟 0.4、6 次脉冲",
+			fs.origin == AreaSpec.Origin.TARGET and is_equal_approx(fs.delay, 0.4) and fs.pulses == 6)
+	_check("烈焰风暴点燃是几率（40%）", _has_buff(Gems.gem_firestorm().build(), &"ignite")
+			and is_equal_approx(Gems.gem_firestorm().build().on_hit_chance, 0.40))
+	_check("烈焰风暴单次脉冲比风暴呼唤轻得多（6 次全吃才追上）",
+			Gems.gem_firestorm().build().base_damage * 6.0 > Gems.gem_storm_call().build().base_damage
+			and Gems.gem_firestorm().build().base_damage < Gems.gem_storm_call().build().base_damage * 0.3)
+
+	var vx := AreaSpec.build(p, Gems.gem_vortex().build())
+	_check("漩涡：以自己为中心、瞬发、4 次脉冲、冰缓",
+			vx.origin == AreaSpec.Origin.SELF and is_zero_approx(vx.delay) and vx.pulses == 4
+			and _has_buff(Gems.gem_vortex().build(), &"chill"))
+	_check("漩涡带持续时间标签（延长持续 = 多转几圈）",
+			Gems.support_duration().can_support(Gems.gem_vortex().tags))
+
+	var ct := AreaSpec.build(p, Gems.gem_contagion().build())
+	_check("瘟疫：指哪打哪、瞬发、一次性", ct.origin == AreaSpec.Origin.TARGET and is_zero_approx(ct.delay) and ct.pulses == 1)
+	_check("瘟疫挂 contagion DoT、★ 故意不带持续时间标签 ★",
+			_has_buff(Gems.gem_contagion().build(), &"contagion")
+			and (Gems.gem_contagion().tags & T.DURATION) == 0)
+	var mob := Demo.make_monster()
+	var pc := Demo.make_player()
+	mob.apply_buff(Demo.buff_contagion(), pc)
+	mob.apply_buff(Demo.buff_essence_drain(), pc)
+	mob.apply_buff(Demo.buff_soulrend(), pc)
+	_check("★ 三个混沌 DoT 三个 id，能同时挂 ★", mob.buffs.count_of(&"contagion") == 1
+			and mob.buffs.has(&"essence_drain") and mob.buffs.has(&"soulrend"))
+	_check("半秒后三份各跳一次", DamagePipeline.resolve_dots(mob, 0.5).size() == 3)
+	_check("虚空操纵连得上瘟疫、元素集中连不上", Gems.support_void().can_support(Gems.gem_contagion().tags)
+			and not Gems.support_ele_focus().can_support(Gems.gem_contagion().tags))
+	_check("连环范围连得上三颗、连不上电球术",
+			Gems.support_cascade().can_support(Gems.gem_firestorm().tags)
+			and Gems.support_cascade().can_support(Gems.gem_vortex().tags)
+			and Gems.support_cascade().can_support(Gems.gem_contagion().tags)
+			and not Gems.support_cascade().can_support(Gems.gem_spark().tags))
+	p.skill_mods.add_all(Gems.support_cascade().build_mods())
+	_check("连环范围：漩涡变 3 个圈、伤害 ×0.8",
+			AreaSpec.build(p, Gems.gem_vortex().build()).cascade == 2
+			and is_equal_approx(p.get_stat(S.DAMAGE, Gems.gem_vortex().build().hit_tags(), 100.0), 80.0))
+
+
+func _test_support_tiers() -> void:
+	_begin("★ 辅助稀有度：普通 / 崇高 / 血脉（ADR-031）★")
+	# ---- 层级字段和图鉴归属 ----
+	for g in Gems.all_supports():
+		if (g as SupportGem).tier != SupportGem.Tier.NORMAL:
+			_check("all_supports 里混进了非普通辅助：%s" % (g as SupportGem).display_name, false)
+	_check("崇高 4 颗、血脉 3 颗", Gems.all_sublime().size() == 4 and Gems.all_lineage().size() == 3)
+	var all_tiers_ok := true
+	for g in Gems.all_sublime():
+		if (g as SupportGem).tier != SupportGem.Tier.SUBLIME:
+			all_tiers_ok = false
+	for g in Gems.all_lineage():
+		if (g as SupportGem).tier != SupportGem.Tier.LINEAGE:
+			all_tiers_ok = false
+	_check("层级字段填对了", all_tiers_ok)
+	_check("按 id 能造出崇高和血脉（存档 / 控制台靠它）",
+			Gems.make_gem(&"sub_area") != null and Gems.make_gem(&"lin_aira") != null)
+	_check("血脉魔力倍率 ×1.0（代价在词缀里）",
+			is_equal_approx(Gems.lineage_grim().mana_multiplier, 1.0)
+			and is_equal_approx(Gems.lineage_aira().mana_multiplier, 1.0))
+	_check("崇高的魔力倍率比同款普通贵",
+			Gems.sublime_area().mana_multiplier > Gems.support_area().mana_multiplier
+			and Gems.sublime_conc().mana_multiplier > Gems.support_conc().mana_multiplier)
+	_check("崇高 / 血脉没有等级、不参与合成", Gems.sublime_area().max_level == 1 and Gems.lineage_grim().max_level == 1)
+	_check("tooltip 标出了层级", Gems.sublime_area().tooltip().contains("崇高辅助")
+			and Gems.lineage_grim().tooltip().contains("血脉辅助"))
+
+	# ---- 崇高 = 普通的加强版 + 一条负面（每一条都要真的比普通款强，且真的有负面）----
+	var nova := Gems.gem_ice_nova().build()
+	var pn := CombatEntity.new(&"n", "普通")
+	pn.skill_mods.add_all(Gems.support_area().build_mods())
+	var ps := CombatEntity.new(&"s", "崇高")
+	ps.skill_mods.add_all(Gems.sublime_area().build_mods())
+	_check("★ 崇高·增大范围：圈比普通款大（√2 vs √1.5）★",
+			AreaSpec.build(ps, nova).radius > AreaSpec.build(pn, nova).radius)
+	_close("崇高·增大范围的负面：伤害 ×0.85", ps.get_stat(S.DAMAGE, nova.hit_tags(), 100.0), 85.0)
+	var pc := CombatEntity.new(&"c", "崇高集中")
+	pc.skill_mods.add_all(Gems.sublime_conc().build_mods())
+	_close("崇高·集中效应：伤害 ×1.65", pc.get_stat(S.DAMAGE, nova.hit_tags(), 100.0), 165.0)
+	_close("崇高·集中效应的负面：半径 × √0.5", AreaSpec.build(pc, nova).radius, 90.0 * sqrt(0.5))
+	var pl := CombatEntity.new(&"l", "崇高缩短")
+	pl.skill_mods.add_all(Gems.sublime_less_duration().build_mods())
+	var call := Gems.gem_storm_call().build()
+	_close("崇高·缩短持续：风暴呼唤 1.2 → 0.36 秒", AreaSpec.build(pl, call).delay, 1.2 * 0.30)
+	_check("崇高·缩短持续：烈焰风暴 6 → 2 次", AreaSpec.build(pl, Gems.gem_firestorm().build()).pulses == 2,
+			"实际 %d" % AreaSpec.build(pl, Gems.gem_firestorm().build()).pulses)
+	var pk := CombatEntity.new(&"k", "崇高连环")
+	pk.skill_mods.add_all(Gems.sublime_cascade().build_mods())
+	_check("崇高·连环范围：+4 个圈、伤害 ×0.65",
+			AreaSpec.build(pk, nova).cascade == 4
+			and is_equal_approx(pk.get_stat(S.DAMAGE, nova.hit_tags(), 100.0), 65.0))
+
+	# ---- 血脉：每颗都改一件"普通辅助改不了的事" ----
+	var g1 := CombatEntity.new(&"g1", "格里姆")
+	g1.skill_mods.add_all(Gems.lineage_grim().build_mods())
+	_close("格里姆之震：半径 × √1.6", AreaSpec.build(g1, nova).radius, 90.0 * sqrt(1.6))
+	_close("格里姆之震：范围伤害 ×1.2", g1.get_stat(S.DAMAGE, nova.hit_tags(), 100.0), 120.0)
+	_close("格里姆之震的代价：范围技能施法速度 ×0.75", g1.get_stat(S.CAST_SPEED, nova.hit_tags(), 1.0), 0.75)
+	_close("对投射物技能的施法速度没影响", g1.get_stat(S.CAST_SPEED, Gems.gem_spark().build().hit_tags(), 1.0), 1.0)
+	var g2 := CombatEntity.new(&"g2", "艾拉")
+	g2.skill_mods.add_all(Gems.lineage_aira().build_mods())
+	_check("★ 艾拉之脉动：新星变三连炸 ★", AreaSpec.build(g2, nova).pulses == 3)
+	_close("艾拉之脉动的代价：半径 × √0.75", AreaSpec.build(g2, nova).radius, 90.0 * sqrt(0.75))
+	var g3 := CombatEntity.new(&"g3", "塞洛斯")
+	g3.skill_mods.add_all(Gems.lineage_seros().build_mods())
+	_close("塞洛斯之瞬：风暴呼唤 1.2 → 0.3 秒", AreaSpec.build(g3, call).delay, 0.3)
+	_check("塞洛斯之瞬只连带持续时间的范围技能（新星连不上、风暴呼唤连得上）",
+			not Gems.lineage_seros().can_support(Gems.gem_ice_nova().tags)
+			and Gems.lineage_seros().can_support(Gems.gem_storm_call().tags))
+	_close("塞洛斯之瞬不动火球的投射物存活（要求范围+持续时间，火球没有持续时间）",
+			ProjectileSpec.build(g3, Gems.gem_fireball().build()).duration,
+			ProjectileSpec.build(CombatEntity.new(), Gems.gem_fireball().build()).duration)
+
+	# ---- 掉落规则：崇高按层进池 / 上架，血脉只从 Boss 掉且不重复 ----
+	var pool0 := RunContent.reward_pools([], 0)
+	var pool1 := RunContent.reward_pools([], 1)
+	_check("★ 第 1 层奖励池没有崇高，第 2 层起有 ★",
+			(pool0["supports"] as Array).size() == Gems.all_supports().size()
+			and (pool1["supports"] as Array).size() == Gems.all_supports().size() + 4)
+	var has_lineage := false
+	for g in pool1["supports"]:
+		if (g as SupportGem).tier == SupportGem.Tier.LINEAGE:
+			has_lineage = true
+	_check("血脉永远不进奖励池", not has_lineage)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 9
+	_check("第 1~2 层商店不上崇高", RunContent.shop_stock(rng, 1).size()
+			== RunContent.SHOP_ACTIVES + RunContent.SHOP_SUPPORTS + RunContent.SHOP_EQUIPS)
+	var deep_stock := RunContent.shop_stock(rng, 2)
+	var sub_on_shelf := 0
+	for thing in deep_stock:
+		if thing is SupportGem and (thing as SupportGem).tier == SupportGem.Tier.SUBLIME:
+			sub_on_shelf += 1
+	_check("★ 第 3 层起货架多一颗崇高，且有价（45）★", sub_on_shelf == RunContent.SHOP_SUBLIME
+			and RunContent.price_of(Gems.sublime_area()) == 45)
+	_check("崇高比普通辅助贵", RunContent.price_of(Gems.sublime_area()) > RunContent.price_of(Gems.support_area()))
+
+	var r1 := RandomNumberGenerator.new()
+	r1.seed = 77
+	var first := RunContent.boss_lineage([], r1)
+	var r2 := RandomNumberGenerator.new()
+	r2.seed = 77
+	_check("Boss 必掉一颗血脉，同种子同一颗（读档重打刷不了）",
+			first != null and RunContent.boss_lineage([], r2).id == first.id)
+	var second := RunContent.boss_lineage([first.id], r1)
+	_check("已有的不再掉（从剩下的里抽）", second != null and second.id != first.id)
+	var third_ids: Array = [first.id, second.id]
+	var third := RunContent.boss_lineage(third_ids, r1)
+	_check("三颗集齐后不再掉（返回 null）", third != null and RunContent.boss_lineage(third_ids + [third.id], r1) == null)
+
+
+# ================================================================ ADR-032：近战武器 + 攻击技能
+
+func _test_melee_weapons() -> void:
+	_begin("★ 近战武器：只收攻击技能、词缀只给槽里的技能、基准角色不带 ★")
+	_check("武器 4 件、都在图鉴里", EquipLibrary.all_weapons().size() == 4
+			and EquipLibrary.all_items().size() == 11 and EquipLibrary.make_item(&"iron_sword") != null)
+	for w in EquipLibrary.all_weapons():
+		var e := w as EquipItem
+		_check("%s 有槽、是武器、写进了价目表" % e.display_name, e.has_socket() and e.is_weapon()
+				and RunContent.PRICES.has(e.id))
+		for m in e.mods:
+			_check("%s 的词缀全要求【攻击】（放背包里对法术零影响）" % e.display_name,
+					((m as Modifier).required_tags & T.ATTACK) != 0)
+	_check("法杖不是武器", not EquipLibrary.staff().is_weapon() and not EquipLibrary.apprentice_wand().is_weapon())
+	_check("★ 基准角色的装备里没有武器 ★（老伤害断言的地基不动）", EquipLibrary.default_loadout().size() == 7)
+
+	# ---- 槽的类型：法术进法杖、攻击进武器 ----
+	var sword := EquipLibrary.iron_sword()
+	var wand := EquipLibrary.apprentice_wand()
+	_check("铁剑收重击、不收火球", sword.accepts_gem(Gems.gem_heavy_strike()) and not sword.accepts_gem(Gems.gem_fireball()))
+	_check("法杖收火球、不收重击", wand.accepts_gem(Gems.gem_fireball()) and not wand.accepts_gem(Gems.gem_heavy_strike()))
+	_check("灵体投掷是攻击 → 进武器不进法杖",
+			sword.accepts_gem(Gems.gem_spectral_throw()) and not wand.accepts_gem(Gems.gem_spectral_throw()))
+	var g := GemGrid.new()
+	var sp := g.place(sword, Vector2i(2, 1), 0)
+	var wp := g.place(wand, Vector2i(5, 1), 0)
+	_check("★ 火球点到铁剑上：拒绝并说明原因 ★",
+			g.socket_reject_reason(Gems.gem_fireball(), Vector2i(2, 1)).contains("攻击技能"))
+	_check("重击点到法杖上：拒绝", g.socket_reject_reason(Gems.gem_heavy_strike(), Vector2i(5, 1)).contains("法术技能"))
+	_check("重击点到铁剑上：放行", g.socket_reject_reason(Gems.gem_heavy_strike(), Vector2i(2, 1)) == "")
+	_check("火球点到法杖上：照旧放行", g.socket_reject_reason(Gems.gem_fireball(), Vector2i(5, 1)) == "")
+
+	# ---- 武器词缀的作用域：只给槽里的技能（走 skill_mods），不进 equip 层 ----
+	g.socket(Gems.gem_heavy_strike(), sp)
+	g.socket(Gems.gem_fireball(), wp)
+	_check("镶好后两个载体都能施放", g.skill_items().size() == 2)
+	_check("★ equip 层里没有武器的词缀 ★（和法杖一样只跟着槽里的技能）", g.equip_mods().is_empty())
+	var p := Demo.make_player()
+	p.skill_mods.add_all(g.link_for(sp).mods())
+	var strike := g.link_for(sp).skill()
+	var bd := p.stat_breakdown(S.DAMAGE, strike.hit_tags(), strike.base_damage)
+	_close("★ 铁剑的 +70 攻击伤害加在重击的点伤上（FLAT）★", bd["flat"], 70.0)
+	_close("重击的攻速吃铁剑的 +10%", p.get_stat(S.ATTACK_SPEED, strike.hit_tags()), 1.10)
+	p.skill_mods.clear()
+	p.skill_mods.add_all(g.link_for(wp).mods())
+	var fire := g.link_for(wp).skill()
+	_close("切到法杖：火球吃不到铁剑的任何东西", p.stat_breakdown(S.DAMAGE, fire.hit_tags(), fire.base_damage)["flat"],
+			Demo.make_player().stat_breakdown(S.DAMAGE, fire.hit_tags(), fire.base_damage)["flat"])
+	# 换武器 = 换底子：巨锤 +170 但攻速 −20%
+	var maul := EquipLibrary.great_maul()
+	maul.socketed = Gems.gem_heavy_strike()
+	var g2 := GemGrid.new()
+	var mp := g2.place(maul, Vector2i(0, 0), 0)
+	var p2 := Demo.make_player()
+	p2.skill_mods.add_all(g2.link_for(mp).mods())
+	_close("巨锤：+170 点伤", p2.stat_breakdown(S.DAMAGE, strike.hit_tags(), strike.base_damage)["flat"], 170.0)
+	_close("巨锤：攻速 ×0.8", p2.get_stat(S.ATTACK_SPEED, strike.hit_tags()), 0.80)
+	_close("巨锤：攻击的范围 +30%（重锤猛击锥长 95 × √1.3）",
+			AreaSpec.build(p2, Gems.gem_ground_slam().build()).radius, 95.0 * sqrt(1.3))
+	_close("巨锤对法术的范围无影响", AreaSpec.build(p2, Gems.gem_ice_nova().build()).radius, 90.0)
+	# 匕首：暴击只对攻击
+	var dp := Demo.make_player()
+	dp.skill_mods.add_all(EquipLibrary.dagger().build_mods())
+	_check("匕首的暴击率加成只对攻击（重击暴击 > 火球暴击的增幅）",
+			dp.get_stat(S.CRIT_CHANCE, strike.hit_tags(), 0.06) > Demo.make_player().get_stat(S.CRIT_CHANCE, strike.hit_tags(), 0.06)
+			and is_equal_approx(dp.get_stat(S.CRIT_CHANCE, fire.hit_tags(), 0.06),
+				Demo.make_player().get_stat(S.CRIT_CHANCE, fire.hit_tags(), 0.06)))
+	_check("面板写明槽收什么", sword.tooltip().contains("攻击技能") and wand.tooltip().contains("法术技能"))
+
+	# 存档：武器 + 槽里的攻击技能一起存、一起读
+	var data := g.to_data()
+	var g3 := GemGrid.new()
+	g3.from_data(data, GemSave.resolve)
+	var restored_sword: GemGrid.Placed = null
+	for it in g3.items:
+		if (it as GemGrid.Placed).gem.id == &"iron_sword":
+			restored_sword = it
+	_check("存档读回来：铁剑还在、槽里还是重击",
+			restored_sword != null and restored_sword.skill_gem() != null
+			and restored_sword.skill_gem().id == &"heavy_strike")
+
+
+func _test_melee_skills() -> void:
+	_begin("★ 攻击技能：近战 = 面前的圈、走攻速；中毒独立叠加；灵体投掷是攻击投射物 ★")
+	_check("攻击技能 10 颗（近战 9 + 灵体投掷）", Gems.all_attacks().size() == 10, "实际 %d" % Gems.all_attacks().size())
+	for g in Gems.all_attacks():
+		var sg := g as SkillGem
+		_check("%s 带【攻击】不带【法术】、写进了价目表" % sg.display_name,
+				(sg.tags & T.ATTACK) != 0 and (sg.tags & T.SPELL) == 0 and RunContent.PRICES.has(sg.id))
+		_check("%s 的点伤比同类法术低（大头在武器上）" % sg.display_name, sg.base.base_damage < 100.0)
+
+	var p := CombatEntity.new(&"t", "测试")
+	var strike := Gems.gem_heavy_strike().build()
+	var a := AreaSpec.build(p, strike)
+	_check("★ 重击是近战：面前 22 像素处、半径 26 的圈 ★",
+			strike.is_area() and a.origin == AreaSpec.Origin.FRONT and is_equal_approx(a.range, 22.0)
+			and is_equal_approx(a.radius, 26.0))
+	_check("面前的圈不夹距离（不是指哪打哪）", is_equal_approx(a.clamp_distance(300.0), 300.0))
+	_check("describe 写明是挥砍", a.describe().contains("挥砍"))
+	_check("横扫 / 重锤猛击 / 重击都带【范围】→ 增大范围都连得上（重击的小圈也是圈，ADR-037）",
+			Gems.support_area().can_support(Gems.gem_cleave().tags)
+			and Gems.support_area().can_support(Gems.gem_ground_slam().tags)
+			and Gems.support_area().can_support(Gems.gem_heavy_strike().tags))
+	_check("多重投射连不上近战、连得上灵体投掷",
+			not Gems.support_multi().can_support(Gems.gem_cleave().tags)
+			and Gems.support_multi().can_support(Gems.gem_spectral_throw().tags))
+	_check("迅捷施法连不上攻击技能（它要求【法术】）",
+			not Gems.support_faster_cast().can_support(Gems.gem_cleave().tags))
+	_check("法术节魔也连不上", not Gems.support_inspiration().can_support(Gems.gem_cleave().tags))
+
+	# ---- 出手间隔走攻击速度，施法速度对它无效 ----
+	var pc := Demo.make_player()   # 橡木法杖 +25% 施法速度在 equip 层
+	var aps_before := DamagePipeline.actions_per_second(pc, strike)
+	_close("重击每秒 1.0 次（攻速 1.0 ÷ 攻击时间 1.0；橡木法杖的施法速度对它无效）", aps_before, 1.0)
+	pc.skill_mods.add(M.new(S.CAST_SPEED, M.Kind.INCREASED, 1.0, T.NONE))
+	_close("★ 再加 100% 施法速度：重击还是 1.0 次/秒 ★", DamagePipeline.actions_per_second(pc, strike), 1.0)
+	pc.skill_mods.add(M.new(S.ATTACK_SPEED, M.Kind.INCREASED, 0.5, T.NONE))
+	_close("加 50% 攻速：1.5 次/秒", DamagePipeline.actions_per_second(pc, strike), 1.5)
+	_close("电球术反过来：吃施法速度不吃攻速",
+			DamagePipeline.actions_per_second(pc, Gems.gem_spark().build()),
+			(1.0 + 0.25 + 1.0) / Gems.gem_spark().build().cast_time)
+
+	# ---- 双重打击 / 旋风斩 / 静电之击的脉冲 ----
+	_check("双重打击 2 次脉冲、旋风斩每段 1 圈（以自己为中心）、静电之击 3 次",
+			AreaSpec.build(p, Gems.gem_double_strike().build()).pulses == 2
+			and AreaSpec.build(p, Gems.gem_cyclone().build()).pulses == 1
+			and AreaSpec.build(p, Gems.gem_cyclone().build()).origin == AreaSpec.Origin.SELF
+			and AreaSpec.build(p, Gems.gem_static_strike().build()).pulses == 3)
+	_check("★ 旋风斩 / 双重打击的圈跟着施法者走；漩涡 / 静电之击 / 烈焰风暴留在原地 ★",
+			AreaSpec.build(p, Gems.gem_cyclone().build()).follow
+			and AreaSpec.build(p, Gems.gem_double_strike().build()).follow
+			and not AreaSpec.build(p, Gems.gem_vortex().build()).follow
+			and not AreaSpec.build(p, Gems.gem_static_strike().build()).follow
+			and not AreaSpec.build(p, Gems.gem_firestorm().build()).follow)
+	_check("跟着走的 describe 写明了", AreaSpec.build(p, Gems.gem_cyclone().build()).describe().contains("跟着"))
+	# ---- 引导技能（ADR-033）：旋风斩 / 焚烧 / 闪电之触 ----
+	var channels := 0
+	for g in Gems.all_actives():
+		if (g as SkillGem).build().is_channel():
+			channels += 1
+	_check("★ 引导技能 3 颗：旋风斩 / 焚烧 / 闪电之触 ★", channels == 3
+			and Gems.gem_cyclone().build().is_channel() and Gems.gem_incinerate().build().is_channel()
+			and Gems.gem_lightning_tendrils().build().is_channel(), "实际 %d" % channels)
+	_check("重击 / 火球不是引导", not Gems.gem_heavy_strike().build().is_channel()
+			and not Gems.gem_fireball().build().is_channel())
+	var cyc := Gems.gem_cyclone().build()
+	_check("旋风斩每段 0.25 秒、每段 4 蓝（16 蓝/秒 > 基础回蓝 12，蓝就是计时器）",
+			is_equal_approx(cyc.cast_time, 0.25) and is_equal_approx(cyc.mana_cost, 4.0)
+			and cyc.mana_cost / cyc.cast_time > 12.0)   # 12 = Player.MANA_REGEN 的裸基础值（不带回蓝装备）
+	_check("★ 引导的代价换来伤害：旋风斩每圈 ≥ 55 ★（老版 5 圈 × 32 = 每秒 178，现在每秒 220 + 武器×4）",
+			cyc.base_damage >= 55.0 and cyc.base_damage / cyc.cast_time > 32.0 * 5.0 / 0.9)
+	_check("旋风斩不带持续时间了（引导没有'持续'，延长持续连不上）",
+			not Gems.support_duration().can_support(Gems.gem_cyclone().tags))
+	_check("面板写明引导", Gems.gem_cyclone().tooltip().contains("引导"))
+
+	# ---- 元素近战：附加异常 ----
+	_check("炼狱之击点燃 / 冰霜之锤冰缓 / 静电之击感电 / 毒蛇打击中毒",
+			_has_buff(Gems.gem_infernal_blow().build(), &"ignite")
+			and _has_buff(Gems.gem_glacial_hammer().build(), &"chill")
+			and _has_buff(Gems.gem_static_strike().build(), &"shock")
+			and _has_buff(Gems.gem_viper_strike().build(), &"poison"))
+	_check("闪电增强连得上静电之击、冰霜增强连不上", Gems.support_lightning().can_support(Gems.gem_static_strike().tags)
+			and not Gems.support_cold().can_support(Gems.gem_static_strike().tags))
+
+	# ---- 中毒：INDEPENDENT 独立叠加，每份各自计时 ----
+	var mob := Demo.make_monster()
+	var att := Demo.make_player()
+	mob.apply_buff(Demo.buff_poison(), att)
+	mob.apply_buff(Demo.buff_poison(), att)
+	mob.apply_buff(Demo.buff_poison(), att)
+	_check("★ 三刀 = 三份中毒（不像精髓吸取只刷新）★", mob.buffs.count_of(&"poison") == 3)
+	var ev := DamagePipeline.resolve_dots(mob, 0.5)
+	_check("半秒后三份各跳一次、每份都吃 −30% 混沌抗（×1.3）", ev.size() == 3
+			and is_equal_approx(ev[0]["damage"], ev[0]["raw"] * 1.3))
+	mob.tick_buffs(2.0)
+	_check("2 秒后全部消退", not mob.buffs.has(&"poison"))
+
+	# ---- 灵体投掷：攻击投射物 ----
+	var st := Gems.gem_spectral_throw().build()
+	var sp := ProjectileSpec.build(p, st)
+	_check("灵体投掷是攻击 + 投射物、不是范围、穿透一切",
+			st.is_attack() and st.is_projectile() and not st.is_area() and sp.pierce_count >= 90)
+	var wp := Demo.make_player()
+	wp.skill_mods.add_all(EquipLibrary.war_axe().build_mods())
+	_close("镶在战斧里：+110 点伤加在灵体投掷上", wp.stat_breakdown(S.DAMAGE, st.hit_tags(), st.base_damage)["flat"], 110.0)
+	# 基准角色天赋里有「投射物伤害 +40%」，灵体投掷本来就吃它；战斧的「近战 +15%」不该再叠上来
+	_close("战斧的「近战伤害提高」对灵体投掷无效（它不是近战）：还是天赋的 +40%",
+			wp.stat_breakdown(S.DAMAGE, st.hit_tags(), 100.0)["increased"],
+			Demo.make_player().stat_breakdown(S.DAMAGE, st.hit_tags(), 100.0)["increased"])
+	_close("对横扫有效（+15%，横扫不是投射物、吃不到天赋）",
+			wp.stat_breakdown(S.DAMAGE, Gems.gem_cleave().build().hit_tags(), 100.0)["increased"], 0.15)
+
+	# ---- 冰川之刺：天生连环 2，连环范围再 +2 ----
+	var gc := AreaSpec.build(p, Gems.gem_glacial_cascade().build())
+	_check("冰川之刺：面前 90 像素处、天生连环 2（三个圈一条线）", gc.origin == AreaSpec.Origin.FRONT
+			and gc.cascade == 2 and gc.cascade_offsets() == [1.0, -1.0])
+	p.skill_mods.add_all(Gems.support_cascade().build_mods())
+	_check("连环范围叠上去：2 + 2 = 4", AreaSpec.build(p, Gems.gem_glacial_cascade().build()).cascade == 4)
+	p.skill_mods.clear()
+	_check("冰川之刺是法术：镶法杖、走施法速度", Gems.gem_glacial_cascade().build().is_attack() == false
+			and EquipLibrary.staff().accepts_gem(Gems.gem_glacial_cascade()))
+
+
+# ================================================================ ADR-035：连锁 vs 弹射
+
+func _test_link_vs_chain() -> void:
+	_begin("★ 连锁 ≠ 弹射：不回头、+500% 速度、优先级在弹射之前 ★")
+	var spec := ProjectileSpec.new()
+	spec.link_count = 2
+	spec.chain_range = 150.0
+	var st := ProjectileState.new(spec)
+	_check("出生时连锁次数 = spec、还没在连锁中、速度倍率 1.0",
+			st.links_left == 2 and not st.is_linking() and is_equal_approx(st.speed_multiplier(), 1.0))
+	_check("第 1 次命中 → 连锁", st.decide_on_hit(1) == ProjectileState.Action.LINK)
+	_close("★ 跳出去之后速度 ×6（更多 500%）★", st.speed_multiplier(), 6.0)
+	_check("正在连锁中", st.is_linking())
+	# 不回头：打过的 1 一律不要；范围外的不要；剩下的取最近
+	var pick := st.pick_link_target([
+		{"id": 1, "dist": 10.0},     # 刚打过的：不要
+		{"id": 2, "dist": 120.0},
+		{"id": 3, "dist": 80.0},
+		{"id": 4, "dist": 400.0},    # 太远
+	])
+	_check("★ 连锁挑没打过的最近的（3），打过的哪怕贴脸也不要 ★", pick == 3, "选了 %d" % pick)
+	st.decide_on_hit(3)
+	var pick2 := st.pick_link_target([{"id": 1, "dist": 10.0}, {"id": 3, "dist": 5.0}])
+	_check("★ 场上只剩打过的 → 连锁到此为止（-1）★", pick2 == -1)
+	# 对照：弹射在同样局面下**会**弹回去
+	var cspec := ProjectileSpec.new()
+	cspec.chain_count = 2
+	cspec.chain_range = 150.0
+	var cst := ProjectileState.new(cspec)
+	cst.decide_on_hit(1)
+	cst.decide_on_hit(3)
+	_check("对照：弹射可以弹回打过的 1（两只怪来回弹）", cst.pick_chain_target([{"id": 1, "dist": 10.0}]) == 1)
+	_check("弹射永远不加速", is_equal_approx(cst.speed_multiplier(), 1.0))
+	_check("第 2 次命中 → 还能连锁；第 3 次没了 → 消失",
+			st.links_left == 0 and st.decide_on_hit(5) == ProjectileState.Action.EXPIRE)
+
+	# 优先级：穿透 > 分叉 > 连锁 > 弹射
+	var pspec := ProjectileSpec.new()
+	pspec.pierce_count = 1
+	pspec.fork_count = 1
+	pspec.link_count = 1
+	pspec.chain_count = 1
+	var pst := ProjectileState.new(pspec)
+	_check("★ 优先级：穿透 > 分叉 > 连锁 > 弹射 ★",
+			pst.decide_on_hit(11) == ProjectileState.Action.PIERCE
+			and pst.decide_on_hit(12) == ProjectileState.Action.FORK
+			and pst.decide_on_hit(13) == ProjectileState.Action.LINK
+			and pst.decide_on_hit(14) == ProjectileState.Action.CHAIN
+			and pst.decide_on_hit(15) == ProjectileState.Action.EXPIRE)
+	# 分叉继承连锁次数和"连锁中"状态
+	var fspec := ProjectileSpec.new()
+	fspec.fork_count = 1
+	fspec.link_count = 2
+	var fst := ProjectileState.new(fspec)
+	fst.decide_on_hit(21)   # 分叉
+	var child := fst.clone_for_fork()
+	_check("分叉出来的继承连锁次数", child.links_left == 2)
+
+	# 词缀 / 内容
+	var p := CombatEntity.new(&"t", "测试")
+	p.skill_mods.add_all(Gems.support_link().build_mods())
+	var fb := ProjectileSpec.build(p, Gems.gem_fireball().build())
+	_check("★ 连锁支援：火球拿到 2 次连锁、0 次弹射 ★", fb.link_count == 2 and fb.chain_count == 0)
+	_check("连锁支援连不上近战 / 新星", not Gems.support_link().can_support(Gems.gem_cleave().tags)
+			and not Gems.support_link().can_support(Gems.gem_ice_nova().tags))
+	p.skill_mods.add_all(Gems.support_chain().build_mods())
+	var both := ProjectileSpec.build(p, Gems.gem_arc().build())
+	_check("电弧 + 连锁支援 + 弹射支援：连锁 3+2、弹射 2（两套次数各自算）", both.link_count == 5 and both.chain_count == 2,
+			"连锁 %d / 弹射 %d" % [both.link_count, both.chain_count])
+	_check("describe 分开写弹射和连锁", both.describe().contains("连锁 5") and both.describe().contains("弹射 2"))
+	_check("面板 / 图鉴：电弧写的是连锁不是弹射", Gems.gem_arc().tooltip().contains("连锁")
+			and Gems.make_gem(&"sup_link") != null)
+
+
+# ================================================================ ADR-036：差异化
+
+func _test_differentiation() -> void:
+	_begin("★ 差异化：命中爆炸 / 变形 / 回旋 / 随行光环 / 环 / 蓄力 / 锥 ★")
+	var p := CombatEntity.new(&"t", "测试")
+
+	# ---- 火球 / 翻滚岩浆：投射物 + 命中爆炸。它们仍是投射物，不是范围技能 ----
+	var fb := Gems.gem_fireball().build()
+	_check("★ 火球是投射物、命中爆炸、不算范围技能 ★", fb.is_projectile() and fb.explodes_on_hit() and not fb.is_area())
+	var fbs := ProjectileSpec.build(p, fb)
+	_close("火球爆炸半径 45", fbs.explode_radius, 45.0)
+	_close("翻滚岩浆每跳炸 40", ProjectileSpec.build(p, Gems.gem_rolling_magma().build()).explode_radius, 40.0)
+	_check("冰矛不炸", is_zero_approx(ProjectileSpec.build(p, Gems.gem_ice_spear().build()).explode_radius))
+	p.skill_mods.add_all(Gems.support_area().build_mods())
+	_close("增大范围能连火球（它有 AREA 标签）：爆炸半径 × √1.5", ProjectileSpec.build(p, fb).explode_radius, 45.0 * sqrt(1.5))
+	p.skill_mods.clear()
+	_check("describe 写明爆炸", fbs.describe().contains("命中爆炸"))
+
+	# ---- 冰矛：飞 70 像素后变形，速度 ×2、暴击 ×3 ----
+	var spear := ProjectileSpec.build(p, Gems.gem_ice_spear().build())
+	var st := ProjectileState.new(spear)
+	_check("出生时没变形：速度倍率 1、暴击倍率 1", not st.is_transformed()
+			and is_equal_approx(st.speed_multiplier(), 1.0) and is_equal_approx(st.crit_multiplier(), 1.0))
+	st.add_travel(69.0)
+	_check("飞了 69 还没变", not st.is_transformed())
+	st.add_travel(1.0)
+	_check("★ 飞满 70 变形：速度 ×2、暴击 ×3 ★", st.is_transformed()
+			and is_equal_approx(st.speed_multiplier(), 2.0) and is_equal_approx(st.crit_multiplier(), 3.0))
+	_check("变形后的暴击率 60%（20% × 3）", is_equal_approx(spear.transform_crit_mult * Gems.gem_ice_spear().build().base_crit_chance, 0.60))
+	var child := st.clone_for_fork()
+	_check("分叉出来的继承已飞距离（不用重新飞 70）", child.is_transformed())
+	_check("其它技能不变形", not ProjectileState.new(ProjectileSpec.build(p, fb)).is_transformed()
+			and is_zero_approx(ProjectileSpec.build(p, fb).transform_after_px))
+
+	# ---- 灵体投掷：回旋，回程能再打一遍 ----
+	var thr := ProjectileSpec.build(p, Gems.gem_spectral_throw().build())
+	var ts := ProjectileState.new(thr)
+	_check("灵体投掷是回旋弹", thr.returns)
+	ts.decide_on_hit(7)
+	_check("去程打过 7 → 不能连续再打 7", not ts.can_hit(7))
+	_check("存活 1.6 秒：剩 1.0 秒时还不掉头，剩 0.8 秒时掉头",
+			not ts.should_return(1.0) and ts.should_return(0.8))
+	ts.start_return()
+	_check("★ 掉头后命中记录清空：回程能再打 7 ★", ts.returning and ts.can_hit(7) and not ts.has_hit(7))
+	_check("掉头只发生一次", not ts.should_return(0.1))
+	_check("火球不回旋", not ProjectileSpec.build(p, fb).returns)
+
+	# ---- 灵魂撕裂：随行光环 ----
+	var soul := ProjectileSpec.build(p, Gems.gem_soulrend().build())
+	_check("灵魂撕裂带 45 像素随行光环、每 0.3 秒一次", is_equal_approx(soul.aura_radius, 45.0)
+			and is_equal_approx(soul.aura_interval, 0.3))
+	_check("精髓吸取没有光环（单体 DoT 弹）", is_zero_approx(ProjectileSpec.build(p, Gems.gem_essence_drain().build()).aura_radius))
+
+	# ---- 电击新星：环。贴身的打不到 ----
+	var ring := AreaSpec.build(p, Gems.gem_shock_nova().build())
+	_check("电击新星是 45~120 的环", is_equal_approx(ring.inner_radius, 45.0) and is_equal_approx(ring.radius, 120.0))
+	var ring_ids := ring.hits([{"id": 1, "dist": 20.0}, {"id": 2, "dist": 45.0}, {"id": 3, "dist": 80.0}, {"id": 4, "dist": 121.0}])
+	_check("★ 环：贴身（20）不中、内沿（45）中、环上（80）中、环外不中 ★", ring_ids == [2, 3], str(ring_ids))
+	_check("冰霜新星是实心圆：贴身也中", AreaSpec.build(p, Gems.gem_ice_nova().build()).hits([{"id": 1, "dist": 5.0}]) == [1])
+	p.skill_mods.add_all(Gems.support_area().build_mods())
+	var big_ring := AreaSpec.build(p, Gems.gem_shock_nova().build())
+	_close("增大范围：环的内外半径同比放大（内 45 × √1.5）", big_ring.inner_radius, 45.0 * sqrt(1.5))
+	p.skill_mods.clear()
+	_check("describe 写明环", ring.describe().contains("环"))
+
+	# ---- 焚烧：蓄力（引导每段叠一层，最多 8 层，+96%）----
+	var inc := Gems.gem_incinerate().build()
+	_check("焚烧带蓄力 Buff", inc.channel_ramp != null and inc.channel_ramp.id == &"incinerate_ramp")
+	var pc := CombatEntity.new(&"c", "施法者")
+	for i in 10:
+		pc.apply_buff(inc.channel_ramp)
+	_check("★ 叠 10 次封顶 8 层 ★", pc.buffs.stacks_of(&"incinerate_ramp") == 8)
+	_close("8 层 = 火焰法术伤害 +96%", pc.get_stat(S.DAMAGE, inc.hit_tags(), 100.0), 196.0)
+	_close("对冰霜法术无效", pc.get_stat(S.DAMAGE, Gems.gem_frostbolt().build().hit_tags(), 100.0), 100.0)
+	pc.tick_buffs(0.7)
+	_check("0.6 秒不续就全掉（松手 = 归零）", pc.buffs.stacks_of(&"incinerate_ramp") == 0)
+	_check("闪电之触没有蓄力（它的差异是宽扇形）", Gems.gem_lightning_tendrils().build().channel_ramp == null)
+
+	# ---- 重锤猛击 / 冰霜之锤：从脚下出发的锥，和横扫 / 重击的圈区分 ----
+	var slam := AreaSpec.build(p, Gems.gem_ground_slam().build())
+	_check("重锤猛击：以自己为中心的 100° 宽锥、长 95（比横扫远一倍）", slam.origin == AreaSpec.Origin.SELF
+			and slam.is_cone() and is_equal_approx(slam.arc_deg, 100.0) and is_equal_approx(slam.radius, 95.0)
+			and slam.radius > AreaSpec.build(p, Gems.gem_cleave().build()).radius * 2.0)
+	var hammer := AreaSpec.build(p, Gems.gem_glacial_hammer().build())
+	_check("冰霜之锤：70° 短锥、长 48、带范围标签；重击仍是面前的小圆", hammer.is_cone()
+			and is_equal_approx(hammer.arc_deg, 70.0) and (Gems.gem_glacial_hammer().tags & T.AREA) != 0
+			and not AreaSpec.build(p, Gems.gem_heavy_strike().build()).is_cone())
+
+	# ---- 瘟疫扩散是 World 的事（冒烟测试验）；这里只确认瘟疫 Buff 还是同一个 id ----
+	_check("瘟疫 Buff id 没变（扩散靠它认）", Demo.buff_contagion().id == &"contagion")

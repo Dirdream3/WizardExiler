@@ -59,16 +59,18 @@
 | `buff_def / buff_instance / buff_container` | Buff 模板 / 实例 / 叠加规则 | 4 种叠加规则：刷新 / 叠层 / 取最强 / 独立 |
 | `skill_spec.gd` | 一次施法用的参数 | 没有等级概念 |
 | `skill_gem.gd` | ★ 主动技能石 ★ | 等级 + 成长 + 标签 → `build()` 出 `SkillSpec` |
-| `support_gem.gd` | ★ 辅助宝石 ★ | 一组带代价的词缀 + `required_tags` |
-| `equip_item.gd` | ★ 一件装备 ★ | 一组词缀 + 形状；法杖多一个**镶嵌槽**（`socket_count` / `socketed`） |
+| `support_gem.gd` | ★ 辅助宝石 ★ | 一组带代价的词缀 + `required_tags`；`tier` 三档：普通 / 崇高 / 血脉（ADR-031） |
+| `equip_item.gd` | ★ 一件装备 ★ | 一组词缀 + 形状；法杖 / 武器多一个**镶嵌槽**（`socket_count` / `socketed`），`socket_tags` 决定槽收法术还是攻击（ADR-032） |
 | `gem_shape.gd` | 占几格、箭头朝哪、怎么转 | 旋转后**归一化到左上角 (0,0)** |
 | `gem_grid.gd` | ★ 背包网格 ★ | 放置/碰撞、镶嵌规则、箭头连接判定、存档序列化 |
 | `gem_link.gd` | 网格**算出来的结果** | 槽里的技能石 + 指着法杖的辅助 |
 | `projectile_spec.gd` | 一发投射物的参数 | 由技能基础值 + 词缀算出 |
 | `projectile_state.gd` | 穿透/分叉/弹射的判定 | 命中后该干嘛 |
+| `area_spec.gd` | ★ 范围技能的参数 ★（ADR-030） | 半径按「范围效果」的平方根放大；延迟吃「持续时间」；`hits([{id,dist}])` 判谁在圈里 |
 | `damage_pipeline.gd` | ★ 五步伤害管线 ★ | 顺序写死：基础→词缀→暴击→减免→承受 |
 | `combat_entity.gd` | 战斗单位的数据模型 | 持有四层词缀 |
 | `hit_result.gd` | 一次伤害的完整记录 | 带分步说明，给面板用 |
+| `monster_affix.gd` | ★ 精英怪的一条词条 ★ | 名字 + 一组词缀 + 可选近战异常 + 体型倍率；`apply_to()` 只挂词缀不 refill（叠完再统一充满） |
 
 ### run/ —— 局流程纯逻辑（规矩同 combat/：零引擎依赖）
 
@@ -83,9 +85,10 @@
 | 文件 | 内容 |
 |---|---|
 | `demo_content.gd` | Buff、怪物技能、角色（含天赋 + 开局装备） |
-| `gem_library.gd` | 2 颗主动技能石 + 9 颗辅助宝石 |
-| `equip_library.gd` | 法杖 / 头盔 / 靴子 / 戒指 |
-| `run_content.gd` | 局模式内容：奖励池、商店定价/进货、按步成长的怪、最终 Boss「骸骨领主」 |
+| `gem_library.gd` | 31 颗主动技能石（20 法术 + 10 攻击 + 冰川之刺；12 投射物 + 19 走范围管线（含 3 颗扇形 / 光束））+ 20 颗普通辅助 + 6 颗触媒 + 4 颗崇高 + 3 颗血脉 |
+| `monster_affixes.gd` | 精英怪词条池（12 条：移动 / 生存 / 攻击 / 抗性 / 爪类），`roll()` 无放回抽取 |
+| `equip_library.gd` | 法杖 / 头盔 / 靴子 / 戒指 / 腰带 / 护符 + 近战武器 ×4（铁剑 / 战斧 / 巨锤 / 匕首，只收攻击技能） |
+| `run_content.gd` | 局模式内容：奖励池 / 商店（崇高按层进池、上架）、守关 Boss 必掉的血脉、按步/层成长的怪、★ 房间编制与精英怪生成 ★、每层 Boss |
 
 **这一层没有逻辑，全是数据** → 加内容最省事，也最适合多人/多 AI 并行。
 
@@ -93,10 +96,11 @@
 
 | 文件 | 管什么 |
 |---|---|
-| `world.gd` | 主场景调度：搭场地、刷怪、接信号、把鼠标位置告诉玩家 |
+| `world.gd` | 主场景调度：搭场地、刷怪（局模式按名单分波：先放满一波、死一只补一只）、接信号、把鼠标位置告诉玩家 |
 | `player.gd` | 移动 + 施法 + **持有背包网格** |
-| `enemy.gd` | 追击 + 近战 |
+| `enemy.gd` | 追击 + 近战；精英的外观（金色 / 放大 / 头顶词条名）和爪类词条的近战附带异常 |
 | `projectile.gd` | 投射物怎么飞、怎么弹、怎么分叉 |
+| `area_burst.gd` | 范围技能的圈：预警圈 → `exploded` → 冲击波淡出。结算在 `World._resolve_area()` |
 | `inventory_ui.gd` | ★ 左侧 300px 常驻面板 ★ |
 | `gem_grid_view.gd` | ★ 网格怎么画、点击怎么翻译成格子坐标 ★ |
 | `hud.gd` | 盖在战斗画面上的两样：死亡大字 + Tab 详情面板 |
@@ -105,7 +109,7 @@
 | `run_session.gd` | ★ 局模式总开关 + 局存档（run.json）★ 开局孤石背包也是它铺的 |
 | `run_ui.gd` | 局流程界面：地图选房 / 奖励三选一 / 商店（只画和转发，规则全在 `run/`） |
 | `damage_report.gd` | Tab 面板的文本（迷你版 Path of Building） |
-| `pixel_art.gd` | 占位美术：字符画 → 贴图 |
+| `pixel_art.gd` | 贴图唯一入口：优先 `assets/sprites/` 的真素材（Kenney / Painterly，见 assets/CREDITS.md），缺了退回字符画 |
 | `input_setup.gd` | 用代码注册按键 |
 
 ---
@@ -118,6 +122,8 @@
       └→ Player._try_cast()：查魔力、算冷却（施放时间 ÷ 施法速度）
           └→ 发 cast_requested 信号
               └→ GameWorld._on_cast_requested()
+                  ├→ 范围技能？→ AreaSpec.build → AreaBurst 画圈 → exploded → _resolve_area()
+                  │    圈里每只怪各走一次 DamagePipeline.compute_hit（ADR-030）
                   ├→ ProjectileSpec.build(玩家属性, 当前技能)   ← 纯逻辑
                   │    读 PROJECTILE_COUNT / SPREAD / DURATION … 全走四段式
                   └→ 按 spread_angles() 生成 N 个 Projectile 节点

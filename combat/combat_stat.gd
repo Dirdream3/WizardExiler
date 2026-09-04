@@ -1,4 +1,4 @@
-﻿class_name CombatStat
+class_name CombatStat
 extends RefCounted
 
 ## 属性表
@@ -34,10 +34,15 @@ enum {
 	PIERCE_CHANCE,     ## 穿透几率（0~1，用完次数后还能靠几率穿）
 	FORK_COUNT,        ## 分叉次数
 	CHAIN_COUNT,       ## 弹射（连锁）次数：命中敌人后转向下一个敌人
-	CHAIN_RANGE,       ## 弹射搜索半径（像素）
+	CHAIN_RANGE,       ## 弹射 / 连锁的搜索半径（像素）
+	LINK_COUNT,        ## ★ 连锁次数（ADR-035）★ 和弹射不同：连锁**不会重复命中**同一个敌人，且连锁中投射物速度 +500%
 	BOUNCE_COUNT,      ## 撞墙反弹次数：撞到地形镜面弹开，不消耗命中次数
 	PROJECTILE_SPREAD, ## 散射角（多发投射物展开的角度，同时也放大随机抖动）
 	PROJECTILE_WANDER, ## 飞行中的随机漂移强度（度/次）。电球术到处乱窜就靠它
+
+	# --- 范围（ADR-031）---
+	AREA_PULSES,       ## 范围技能的脉冲次数（FLAT：+2 = 圈多炸 2 次）。烈焰风暴天生 6 次
+	AREA_CASCADE,      ## 连环次数（FLAT：+2 = 沿施法方向前后各多一个圈）
 
 	COUNT,
 }
@@ -76,9 +81,12 @@ static func stat_name(stat: int) -> String:
 		FORK_COUNT:        return "分叉次数"
 		CHAIN_COUNT:       return "弹射次数"
 		CHAIN_RANGE:       return "弹射半径"
+		LINK_COUNT:        return "连锁次数"
 		BOUNCE_COUNT:      return "反弹次数"
 		PROJECTILE_SPREAD: return "散射角"
 		PROJECTILE_WANDER: return "随机漂移"
+		AREA_PULSES:       return "脉冲次数"
+		AREA_CASCADE:      return "连环次数"
 	return "未知属性(%d)" % stat
 
 

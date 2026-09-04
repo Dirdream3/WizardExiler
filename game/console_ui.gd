@@ -16,6 +16,7 @@ const FILTERS := {
 	"skill": "技能宝石",
 	"support": "辅助宝石",
 	"catalyst": "触媒",
+	"rare": "崇高/血脉",
 	"equip": "装备",
 }
 
@@ -144,10 +145,13 @@ func _matches(thing) -> bool:
 		"skill":
 			return thing is SkillGem
 		"support":
-			# 普通辅助：触媒单独一档，别混在一起
-			return thing is SupportGem and not (thing is CatalystGem)
+			# 普通辅助：触媒、崇高/血脉各单独一档，别混在一起
+			return thing is SupportGem and not (thing is CatalystGem) \
+					and (thing as SupportGem).tier == SupportGem.Tier.NORMAL
 		"catalyst":
 			return thing is CatalystGem
+		"rare":
+			return thing is SupportGem and (thing as SupportGem).tier != SupportGem.Tier.NORMAL
 		"equip":
 			return thing is EquipItem
 	return true

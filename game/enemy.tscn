@@ -4,7 +4,7 @@
 [ext_resource type="Script" path="res://game/health_bar.gd" id="2_bar"]
 
 [sub_resource type="CircleShape2D" id="CircleShape2D_enemy"]
-radius = 5.0
+radius = 7.0
 
 [node name="Enemy" type="CharacterBody2D"]
 collision_layer = 2
@@ -19,6 +19,7 @@ position = Vector2(0, -1)
 offset = Vector2(0, -8)
 
 [node name="Shape" type="CollisionShape2D" parent="."]
+position = Vector2(0, -6)
 shape = SubResource("CircleShape2D_enemy")
 
 [node name="Bar" type="Node2D" parent="."]

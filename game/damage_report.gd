@@ -1,4 +1,4 @@
-﻿class_name DamageReport
+class_name DamageReport
 extends RefCounted
 
 ## 伤害计算详情面板的文本生成（游戏里按 Tab 打开）。
@@ -36,6 +36,16 @@ static func build(attacker: CombatEntity, defender: CombatEntity, skill: SkillSp
 	if not any:
 		lines.append("  （无）")
 
+	if skill.is_area():
+		lines.append(_h("范围"))
+		var asp := AreaSpec.build(attacker, skill)
+		var area_bd := attacker.stat_breakdown(CombatStat.AREA_OF_EFFECT, skill.hit_tags(), 1.0)
+		lines.append("  半径 %.0f（基础 %.0f × √%.2f）    %s    %s" % [
+			asp.radius, skill.area_radius, area_bd["total"],
+			"指哪打哪，射程 %.0f" % asp.range if asp.origin == AreaSpec.Origin.TARGET else "以自己为中心",
+			"延迟 %.2fs" % asp.delay if asp.delay > 0.0 else "瞬发"])
+		lines.append("  [color=#7a7a8c]圈里的敌人各吃一次完整的五步命中；「范围效果」放大的是面积，半径按平方根走[/color]")
+
 	if skill.is_projectile():
 		lines.append(_h("投射物"))
 		var ps := ProjectileSpec.build(attacker, skill)
@@ -49,11 +59,11 @@ static func build(attacker: CombatEntity, defender: CombatEntity, skill: SkillSp
 		if ps.wander_deg > 0.0:
 			lines.append("  飞行漂移：每 %.2fs 转 ±%.0f°  [color=#7a7a8c](电球术乱窜的来源)[/color]" % [
 				ps.wander_interval, ps.wander_deg])
-		lines.append("  穿透 %d 次%s    分叉 %d 次    连锁 %d 次（半径 %.0f）    撞墙反弹 %d 次" % [
+		lines.append("  穿透 %d 次%s    分叉 %d 次    连锁 %d 次（不回头、+500%% 速度）    弹射 %d 次（半径 %.0f）    撞墙反弹 %d 次" % [
 			ps.pierce_count,
 			("" if ps.pierce_chance <= 0.0 else "（+%.0f%% 几率）" % (ps.pierce_chance * 100.0)),
-			ps.fork_count, ps.chain_count, ps.chain_range, ps.bounce_count])
-		lines.append("  [color=#7a7a8c]命中优先级：穿透 > 分叉 > 连锁（PoE 写死的顺序）；撞墙反弹是独立次数，不占命中[/color]")
+			ps.fork_count, ps.link_count, ps.chain_count, ps.chain_range, ps.bounce_count])
+		lines.append("  [color=#7a7a8c]命中优先级：穿透 > 分叉 > 连锁 > 弹射；撞墙反弹是独立次数，不占命中[/color]")
 
 	if defender == null:
 		lines.append(_h("附近没有敌人"))

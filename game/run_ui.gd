@@ -40,7 +40,7 @@ func _ready() -> void:
 
 	_panel = PanelContainer.new()
 	_panel.set_anchors_preset(Control.PRESET_CENTER)
-	_panel.custom_minimum_size = Vector2(320, 0)
+	_panel.custom_minimum_size = Vector2(380, 0)   # 战斗画面 400 宽，留 10px 边
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(0.09, 0.09, 0.13, 0.98)
 	style.border_color = Color(0.36, 0.40, 0.55)
@@ -55,9 +55,9 @@ func _ready() -> void:
 	_box.add_theme_constant_override("separation", 6)
 	_panel.add_child(_box)
 
-	# 常驻状态条（第几步 / 金币），贴在战斗画面顶上
+	# 常驻状态条（第几步 / 金币），贴在战斗画面**底下** —— 放顶上会和居中弹出的奖励面板标题叠在一起
 	_status = UIHelper.label("", 11, Color(0.92, 0.86, 0.60))
-	_status.position = Vector2(8, 6)
+	_status.position = Vector2(8, 378)
 	add_child(_status)
 
 
@@ -145,6 +145,11 @@ func flash_notice(text: String) -> void:
 	_line(text, Color(1.0, 0.55, 0.45))
 
 
+## 好消息（Boss 掉了血脉辅助之类），粉红色
+func note(text: String) -> void:
+	_line(text, Color(0.95, 0.55, 0.65))
+
+
 # ---------------------------------------------------------------- 内部
 
 func _open(title: String) -> void:
@@ -161,12 +166,21 @@ func _button(text: String, on_press: Callable, color := Color(0.88, 0.88, 0.95),
 	var b := Button.new()
 	b.text = text
 	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	# 说明文字太长会把面板撑出战斗画面（截图里"和腰带的…"被切在屏幕外）→ 超出就省略号
+	b.clip_text = true
+	b.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	b.add_theme_font_size_override("font_size", 11)
 	b.add_theme_color_override("font_color", color)
 	if icon != null:
-		# expand_icon：图标缩到按钮内容的高度，原图多大都不会把按钮撑爆
+		# ★ 不用 expand_icon ★ —— 它把图标缩到一行字的高度（约 14px），原有的宝石图四周还有透明边，
+		#   缩完只剩几个像素，看起来像"没有图"（项目主人截图指出）。固定最大 40px、按钮至少 46 高
+		#   （icon_max_width 只限宽不限高，竖长的法杖图会撑到几百像素高 —— 所以还是 expand_icon，
+		#   但把按钮撑到 50 高，图标就按 ~40px 等比缩，不会再缩成一粒）
 		b.icon = icon
 		b.expand_icon = true
+		b.add_theme_constant_override("h_separation", 8)
+		b.custom_minimum_size.y = 50
 	b.pressed.connect(on_press)
 	_box.add_child(b)
 	return b

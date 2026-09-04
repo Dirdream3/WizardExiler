@@ -12,11 +12,20 @@ extends RefCounted
 ##   ① 有 required_tags：只能连到带这些标签的技能上（多重投射连不上近战技能）
 ##   ② 有 mana_multiplier：连得越多，技能的魔力消耗越贵 —— PoE 的主要平衡手段
 
+## ★ 稀有度层级（ADR-031）★
+##   NORMAL  普通辅助：奖励池 / 商店随处可得
+##   SUBLIME 崇高辅助（参考火炬之光的崇高/华贵）：普通款的加强版，效果翻倍、带一条负面。
+##           第 2 层起进奖励池、第 3 层起进商店
+##   LINEAGE 血脉辅助（参考 PoE2 的血脉宝石）：具名、独一份、不进任何池子，
+##           只有守关 Boss 必掉一颗；魔力倍率 ×1.0，代价写在词缀里
+enum Tier { NORMAL, SUBLIME, LINEAGE }
+
 var id: StringName = &""
 var display_name: String = ""
 ## UI 格子里显示的 1 个字
 var short_name: String = "?"
 var description: String = ""
+var tier: int = Tier.NORMAL
 
 ## 辅助宝石自己的标签（显示用，比如「投射物, 混合」）
 var tags: int = CombatTags.NONE
@@ -68,10 +77,25 @@ func clamp_level(lv: int) -> int:
 	return clampi(lv, 1, max_level)
 
 
+## 层级的中文名（UI / 控制台用）
+func tier_name() -> String:
+	match tier:
+		Tier.SUBLIME: return "崇高辅助"
+		Tier.LINEAGE: return "血脉辅助"
+	return "辅助宝石"
+
+
 func tooltip() -> String:
 	var l := PackedStringArray()
-	# 辅助宝石没有等级，标题旁只标类型
-	l.append("[b][color=#8fd45a]%s[/color][/b]  [color=#9a9aac]辅助宝石[/color]" % display_name)
+	# 辅助宝石没有等级，标题旁只标类型；崇高 / 血脉换个颜色，一眼看出它不是普通货
+	var title_col := "#8fd45a"
+	if tier == Tier.SUBLIME:
+		title_col = "#f0c860"
+	elif tier == Tier.LINEAGE:
+		title_col = "#f07090"
+	l.append("[b][color=%s]%s[/color][/b]  [color=#9a9aac]%s[/color]" % [title_col, display_name, tier_name()])
+	if tier == Tier.LINEAGE:
+		l.append("[color=#f07090]★ 守关 Boss 必掉，独一份，不进奖励池和商店 ★[/color]")
 	if required_tags != CombatTags.NONE:
 		l.append("[color=#c8a24a]只能连：【%s】技能[/color]" % CombatTags.describe(required_tags))
 	else:

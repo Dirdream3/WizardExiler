@@ -56,10 +56,17 @@ static func gem_color(gem) -> Color:
 	if gem == null:
 		return Color(0.13, 0.13, 0.18)
 	if gem is EquipItem:
+		if (gem as EquipItem).is_weapon():
+			return Color(0.62, 0.62, 0.72)   # 近战武器：铁灰，和法杖 / 防具的金褐分开
 		return Color(0.72, 0.60, 0.36)
 	if gem is CatalystGem:
 		return Color(0.62, 0.45, 0.78)   # 触媒：紫色，和普通辅助的绿区分开
 	if gem is SupportGem:
+		match (gem as SupportGem).tier:
+			SupportGem.Tier.SUBLIME:
+				return Color(0.82, 0.68, 0.30)   # 崇高：金色（ADR-031）
+			SupportGem.Tier.LINEAGE:
+				return Color(0.80, 0.34, 0.46)   # 血脉：绯红
 		return Color(0.46, 0.72, 0.40)
 	var tags: int = gem.tags
 	if tags & CombatTags.FIRE:
@@ -68,6 +75,8 @@ static func gem_color(gem) -> Color:
 		return Color(0.52, 0.66, 0.96)
 	if tags & CombatTags.COLD:
 		return Color(0.48, 0.80, 0.90)
+	if tags & CombatTags.CHAOS:
+		return Color(0.62, 0.78, 0.36)   # 混沌：病绿（PoE 的混沌配色），和辅助的草绿略偏黄区分
 	return Color(0.70, 0.70, 0.78)
 
 

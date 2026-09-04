@@ -1,4 +1,4 @@
-﻿class_name DemoContent
+class_name DemoContent
 extends RefCounted
 
 ## 示例内容：Buff、怪物技能、角色。
@@ -77,6 +77,62 @@ static func buff_ignite() -> BuffDef:
 		.with_duration(4.0) \
 		.with_stacking(BuffDef.StackRule.INDEPENDENT) \
 		.with_dot(40.0, 0.5, T.FIRE | T.AILMENT)
+
+static func buff_essence_drain() -> BuffDef:
+	# 精髓吸取（Essence Drain）的混沌 DoT —— 这颗技能的伤害大头。
+	# ★ REFRESH 不叠层 ★：PoE 里精髓吸取重复命中同一目标只刷新，不叠加；
+	#   要是 INDEPENDENT，配「多重投射」一发 3 颗全中就是 3 倍 DoT，数值直接崩。
+	# 伤害在施加瞬间快照施法者的混沌 / 持续伤害加成（apply_buff 里做的）。
+	# 标签只有 CHAOS：它不是"异常状态"（不像点燃），所以不带 AILMENT。
+	return BuffDef.new(&"essence_drain", "精髓吸取") 		.as_debuff() 		.with_duration(4.0) 		.with_stacking(BuffDef.StackRule.REFRESH) 		.with_dot(45.0, 0.5, T.CHAOS)
+
+
+static func buff_soulrend() -> BuffDef:
+	# 灵魂撕裂（Soulrend）的混沌 DoT：比精髓吸取轻（25 vs 45 / 半秒、3 秒 vs 4 秒），
+	# 因为它的弹穿透一切、一发能挂一整排 —— 单体重、群体轻，两颗混沌技能才各有分工。
+	# ★ 和精髓吸取是两个 id ★ → 两者能同时挂在同一只怪身上（不同 id 互不刷新）。
+	return BuffDef.new(&"soulrend", "灵魂撕裂") \
+		.as_debuff() \
+		.with_duration(3.0) \
+		.with_stacking(BuffDef.StackRule.REFRESH) \
+		.with_dot(25.0, 0.5, T.CHAOS)
+
+
+static func buff_contagion() -> BuffDef:
+	# 瘟疫（Contagion）的混沌 DoT：范围技能一次挂一片。比精髓吸取轻（30 vs 45），
+	# 因为它是"圈里每个人一份"；和另外两个混沌 DoT 都是不同 id，能叠着挂。
+	return BuffDef.new(&"contagion", "瘟疫") \
+		.as_debuff() \
+		.with_duration(4.0) \
+		.with_stacking(BuffDef.StackRule.REFRESH) \
+		.with_dot(30.0, 0.5, T.CHAOS)
+
+
+static func buff_poison() -> BuffDef:
+	# 中毒（毒蛇打击）：★ INDEPENDENT 独立叠加 ★ —— PoE 的中毒就是每一击各上一份、全部同时结算。
+	# 单份很轻（10/半秒、2 秒），靠出手频率堆：攻速越快毒越多，这是它和精髓吸取（REFRESH）的分工。
+	return BuffDef.new(&"poison", "中毒") \
+		.as_debuff() \
+		.with_duration(2.0) \
+		.with_stacking(BuffDef.StackRule.INDEPENDENT) \
+		.with_dot(10.0, 0.5, T.CHAOS | T.AILMENT)
+
+
+static func buff_incinerate_ramp() -> BuffDef:
+	# 焚烧的蓄力（ADR-036）：引导每放一段叠 1 层，每层火焰法术伤害 +12%、最多 8 层（+96%）；
+	# 0.6 秒不续就掉 —— 松手 / 没蓝 = 蓄力归零。这是 PoE 焚烧"越烧越疼"的手感。
+	return BuffDef.new(&"incinerate_ramp", "焚烧蓄力") \
+		.with_duration(0.6) \
+		.with_stacking(BuffDef.StackRule.STACK_COUNT, 8) \
+		.with_mod(M.new(S.DAMAGE, M.Kind.INCREASED, 0.12, T.FIRE | T.SPELL))
+
+
+static func buff_scorching_claw() -> BuffDef:
+	# ★ 精英怪「灼热之爪」挂在玩家身上的火 DoT ★ —— 故意不复用 buff_ignite：
+	#   玩家的点燃是 40/半秒、独立叠加，那是打怪用的量级；
+	#   怪打玩家的版本要温和（20/半秒、REFRESH 不叠）—— 被两只爪怪围住不该一秒蒸发。
+	#   分开两条定义，将来调玩家的点燃也不会连带改动精英怪的强度。
+	return BuffDef.new(&"scorching_claw", "灼热") 		.as_debuff() 		.with_duration(3.0) 		.with_stacking(BuffDef.StackRule.REFRESH) 		.with_dot(20.0, 0.5, T.FIRE | T.AILMENT)
 
 
 # =============== 技能 ===============

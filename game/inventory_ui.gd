@@ -122,8 +122,15 @@ func _buff_text(st: CombatEntity) -> String:
 func _skill_text() -> String:
 	if player.skill == null:
 		return "[Q] 没有能用的技能 —— 把技能宝石镶进一根法杖"
-	var ps := player.projectile_spec()
 	var head := "[Q] %s  消耗%d" % [player.skill.display_name, roundi(player.skill.mana_cost)]
+	if player.skill.is_channel():
+		head += "/段"
+		head += "  【引导中】" if player.is_channeling() else "  【引导：按住不放】"
+	# 范围技能和投射物技能各有各的参数行（ADR-030）
+	var aspec := player.area_spec()
+	if aspec != null:
+		return "%s  %s" % [head, aspec.describe()]
+	var ps := player.projectile_spec()
 	if ps == null:
 		return head
 	return "%s  %s" % [head, ps.describe()]

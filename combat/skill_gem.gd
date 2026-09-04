@@ -106,7 +106,13 @@ func tooltip(supports: Array = []) -> String:
 		l.append("[color=#8a8a9c]%s[/color]" % description)
 
 	l.append("[color=#7a7a8c]────────────[/color]")
-	l.append("消耗 [b]%.0f[/b] 魔力    施放时间 [b]%.2f[/b] 秒" % [s.mana_cost, s.cast_time])
+	l.append("消耗 [b]%.0f[/b] 魔力    %s [b]%.2f[/b] 秒" % [s.mana_cost,
+			"攻击时间" if s.is_attack() else "施放时间", s.cast_time])
+	if s.is_attack():
+		l.append("[color=#e0b874]攻击技能：要镶进近战武器；武器的攻击伤害会加在它身上[/color]")
+	if s.is_channel():
+		l.append("[color=#f0a860]引导技能：按住持续施放，每 %.2f 秒一段、每段扣 %.0f 蓝；引导中不能切技能[/color]" % [
+			s.cast_time, s.mana_cost])
 	l.append("点伤 [b]%.1f[/b]    暴击 %.1f%% ×%.2f" % [
 		s.base_damage, s.base_crit_chance * 100.0, s.base_crit_multi])
 
@@ -120,9 +126,22 @@ func tooltip(supports: Array = []) -> String:
 		if s.base_pierce > 0: extra.append("穿透 %d" % s.base_pierce)
 		if s.base_fork > 0:   extra.append("分叉 %d" % s.base_fork)
 		if s.base_chain > 0:  extra.append("弹射 %d" % s.base_chain)
+		if s.base_link > 0:   extra.append("连锁 %d（不回头，跳跃几乎瞬间）" % s.base_link)
 		if s.base_bounce > 0: extra.append("撞墙反弹 %d" % s.base_bounce)
 		if not extra.is_empty():
 			l.append("自带：" + "  ".join(extra))
+
+	if s.is_area():
+		var where := "以自己为中心"
+		if s.area_origin == 1:
+			where = "指哪打哪（射程 %.0f）" % s.area_range
+		elif s.area_origin == 2:
+			where = "面前 %.0f 像素处挥砍" % s.area_range
+		l.append("范围半径 [b]%.0f[/b] 像素    %s" % [s.area_radius, where])
+		if s.area_delay > 0.0:
+			l.append("落地延迟 [b]%.1f[/b] 秒（吃「持续时间」：延长持续 = 落得更慢）" % s.area_delay)
+		else:
+			l.append("瞬发，圈里的敌人全部同时命中")
 
 	for b in s.on_hit_buffs:
 		l.append("[color=#8fd45a]命中后附加：%s[/color]" % (b as BuffDef).display_name)

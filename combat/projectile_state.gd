@@ -1,4 +1,4 @@
-﻿class_name ProjectileState
+class_name ProjectileState
 extends RefCounted
 
 ## 一发投射物的**运行时状态**：还剩几次穿透/分叉/弹射、打过谁、下一次漂移还有多久。
@@ -11,7 +11,8 @@ extends RefCounted
 enum Action {
 	PIERCE,  ## 穿透：方向不变，继续飞
 	FORK,    ## 分叉：裂成两发，原来那发消失
-	CHAIN,   ## 弹射：转向另一个敌人
+	LINK,    ## ★ 连锁（ADR-035）★：跳向一个**没打过**的敌人，速度 +500%
+	CHAIN,   ## 弹射：转向另一个敌人（可以弹回打过的）
 	EXPIRE,  ## 没招了，消失
 }
 
@@ -19,11 +20,13 @@ var spec: ProjectileSpec
 
 var pierces_left: int = 0
 var forks_left: int = 0
+var links_left: int = 0
 var chains_left: int = 0
 var bounces_left: int = 0
 
 var pierces_done: int = 0
 var forks_done: int = 0
+var links_done: int = 0
 var chains_done: int = 0
 var bounces_done: int = 0
 
@@ -31,6 +34,11 @@ var bounces_done: int = 0
 var hit_ids: Array[int] = []
 ## **刚刚**打过的那个。规则见 can_hit()
 var last_hit_id: int = -1
+
+## 飞了多远（像素）。变形（冰矛）看它
+var travelled: float = 0.0
+## 回旋中（灵体投掷掉头飞回来了）
+var returning := false
 
 ## ★ 这一发是不是触媒触发出来的（ADR-026 补充）★
 ## 触发产物的击中 / 施加异常**不再给任何触媒攒进度** ——
@@ -45,6 +53,7 @@ func _init(p_spec: ProjectileSpec = null) -> void:
 	spec = p_spec if p_spec != null else ProjectileSpec.new()
 	pierces_left = spec.pierce_count
 	forks_left = spec.fork_count
+	links_left = spec.link_count
 	chains_left = spec.chain_count
 	bounces_left = spec.bounce_count
 
@@ -67,9 +76,10 @@ func can_hit(id: int) -> bool:
 
 ## ★ 核心：命中一个目标之后该干嘛 ★
 ##
-## PoE / PoE2 的优先级是**写死的**：穿透 > 分叉 > 弹射。
+## PoE / PoE2 的优先级是**写死的**：穿透 > 分叉 > 连锁 > 弹射。
 ## 也就是说只要还能穿透，这一次命中就绝不会分叉或弹射 ——
 ## 这也是为什么「穿透」和「分叉/弹射」通常不会配在同一套装备上。
+## 连锁排在弹射前面：电弧连了「弹射支援」，先把自己的 3 次连锁跳完，再用弹射来回弹
 func decide_on_hit(target_id: int, rng: RandomNumberGenerator = null) -> int:
 	if not hit_ids.has(target_id):
 		hit_ids.append(target_id)
@@ -90,13 +100,77 @@ func decide_on_hit(target_id: int, rng: RandomNumberGenerator = null) -> int:
 		forks_done += 1
 		return Action.FORK
 
-	# ③ 弹射
+	# ③ 连锁（不回头、瞬移）
+	if links_left > 0:
+		links_left -= 1
+		links_done += 1
+		return Action.LINK
+
+	# ④ 弹射（可以弹回打过的）
 	if chains_left > 0:
 		chains_left -= 1
 		chains_done += 1
 		return Action.CHAIN
 
 	return Action.EXPIRE
+
+
+## ★ 连锁该跳向谁 ★（ADR-035）—— 和弹射的区别只有一条：**打过的一律不要**。
+## 规则：排除所有 hit_ids、排除超出半径的、取最近的。没有 → -1（连锁到此为止，投射物消失）。
+func pick_link_target(candidates: Array) -> int:
+	var best_id := -1
+	var best_dist := INF
+	for c in candidates:
+		var id := int(c["id"])
+		var dist := float(c["dist"])
+		if has_hit(id) or dist > spec.chain_range:
+			continue
+		if dist < best_dist:
+			best_id = id
+			best_dist = dist
+	return best_id
+
+
+## 现在飞多快（倍率）：连锁跳出去之后 +500%，变形之后 ×transform_speed_mult，两者相乘。表现层每帧乘它
+func speed_multiplier() -> float:
+	var m := 1.0
+	if links_done > 0:
+		m *= 1.0 + ProjectileSpec.LINK_SPEED_MORE
+	if is_transformed():
+		m *= spec.transform_speed_mult
+	return m
+
+
+## 表现层每帧报一下这帧飞了多远（变形靠它计数）
+func add_travel(px: float) -> void:
+	travelled += maxf(0.0, px)
+
+
+## 变形了吗（冰矛飞过 transform_after_px 之后的第二形态）
+func is_transformed() -> bool:
+	return spec.transform_after_px > 0.0 and travelled >= spec.transform_after_px
+
+
+## 这一击的暴击率倍率（变形后 ×transform_crit_mult，其它时候 1）
+func crit_multiplier() -> float:
+	return spec.transform_crit_mult if is_transformed() else 1.0
+
+
+## 回旋：该掉头了吗（回旋技能、存活过半、还没掉头）
+func should_return(lifetime_left: float) -> bool:
+	return spec.returns and not returning and lifetime_left <= spec.duration * 0.5
+
+
+## 掉头。★ 回程能再打一遍打过的 ★ —— 所以命中记录清空
+func start_return() -> void:
+	returning = true
+	hit_ids.clear()
+	last_hit_id = -1
+
+
+## 正在连锁中（已经跳过至少一次）
+func is_linking() -> bool:
+	return links_done > 0
 
 
 ## 弹射该转向谁。
@@ -183,6 +257,10 @@ func clone_for_fork() -> ProjectileState:
 	var c := ProjectileState.new(spec)
 	c.pierces_left = pierces_left
 	c.forks_left = forks_left        # decide_on_hit 里已经扣过 1 了
+	c.links_left = links_left        # 连锁次数也继承（分叉出来的电弧照样连锁）
+	c.links_done = links_done
+	c.travelled = travelled          # 分叉出来的冰矛不用重新飞那段距离
+	c.returning = returning
 	c.chains_left = chains_left
 	c.bounces_left = bounces_left    # 反弹次数也继承：分叉出来的两发照样会弹墙
 	c.pierces_done = pierces_done

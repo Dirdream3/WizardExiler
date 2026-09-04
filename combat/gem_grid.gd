@@ -226,7 +226,11 @@ func socket_reject_reason(gem, origin: Vector2i) -> String:
 	var p := socket_target(gem, origin)
 	if p == null:
 		return ""
-	var cur := (p.gem as EquipItem).socketed
+	var item := p.gem as EquipItem
+	# ★ 槽的类型要对（ADR-032）★ 法术镶法杖、攻击镶武器 —— 载体决定技能类型
+	if not item.accepts_gem(gem as SkillGem):
+		return "「%s」的槽只收%s，「%s」镶不进去" % [item.display_name, item.socket_kind_name(), gem.display_name]
+	var cur := item.socketed
 	if cur != null and cur.id == gem.id and cur.level >= cur.max_level:
 		return "「%s」已经满级，合成不了" % cur.display_name
 	return ""

@@ -1,4 +1,4 @@
-﻿extends SceneTree
+extends SceneTree
 
 ## 集成冒烟测试：真的把游戏跑起来，确认整条链路通：
 ##   放火球 → 命中掉血 → 上点燃 → DoT 持续掉血 → 弹射 → 分叉
@@ -16,6 +16,9 @@
 ## 弹射和分叉分两段测：两个支援同时装上时，分叉出来的两发是朝**外侧**飞的，
 ## 大概率什么都撞不到，弹射分支就永远走不到。所以先只装弹射，再只装分叉。
 
+const Demo = preload("res://data/demo_content.gd")
+const S = preload("res://combat/combat_stat.gd")
+
 const SETUP_AT := 2        # 物理帧。此时场景已经 _ready 完
 const PICK_AT := 20
 const FIRE_AT := 30
@@ -25,7 +28,11 @@ const PHASE_C_AT := 420    # 切换到「电球术」，看散射 / 乱窜 / 撞
 const PHASE_D_AT := 560    # 用**真实按键**施法一次
 const CAST_FRAMES := 60    # 按住施法键多久
 const PHASE_E_AT := 660    # 用**真实按键**切技能
-const CHECK_AT := 760
+const PHASE_ARC_AT := 675  # 电弧连锁：不回头 + 瞬移（ADR-035）
+const PHASE_F_AT := 700    # 范围技能：新星瞬发 → 风暴呼唤延迟落雷（ADR-030）
+const STORM_DELAY_FRAMES := 72   # 1.2 秒 × 60 物理帧
+const FIRESTORM_FRAMES := 24 + 5 * 21 + 12   # 0.4 秒延迟 + 5 个 0.35 秒间隔 + 余量
+const CHECK_AT := 1070
 
 ## 往战斗画面里丢鼠标事件用的视口坐标（x 落在 300~700 之间才会被容器转发进去）
 const AIM_PROBE_VIEWPORT := Vector2(500.0, 100.0)
@@ -53,6 +60,43 @@ var _mouse_after := Vector2.INF    # 注入后
 var _did_switch := false
 var _link_before_switch := -1
 var _link_after_switch := -1
+# ---- 火球爆炸 + 瘟疫扩散（ADR-036）----
+var _did_diff := false
+var _diff_at := 0
+var _diff_b: Enemy = null
+var _diff_stage := 0
+var _explode_before := 0
+# ---- 电弧连锁 ----
+var _did_arc := false
+var _arc_link_before := 0
+var _arc_a: Enemy = null
+var _arc_b: Enemy = null
+# ---- 第七段（范围技能）----
+var _did_area := false
+var _area_target: Enemy = null
+var _area_hits_before := 0
+var _nova_checked := false
+var _did_storm := false
+var _storm_life_before := -1.0
+var _storm_hits_before := 0
+var _storm_early_checked := false
+var _storm_checked := false
+var _did_firestorm := false
+var _firestorm_area_before := 0
+var _firestorm_checked := false
+var _firestorm_at := 0
+# ---- 近战（ADR-032）----
+var _melee_at := 0
+var _melee_front: Enemy = null
+var _melee_back: Enemy = null
+var _melee_checked := false
+var _cyclone_at := 0
+var _cyclone_burst: AreaBurst = null
+var _cyclone_checked := false
+var _channel_at := 0
+var _channel_stage := 0
+var _channel_index := -1
+var _channel_mana := 0.0
 var _next_fire := FIRE_AT
 var _failed := 0
 
@@ -206,6 +250,296 @@ func _process(_delta: float) -> bool:
 			_saw_ignite = true
 			_life_when_ignited = _watch.stats.life
 			print("第 %d 物理帧：目标身上出现【点燃】" % now)
+
+	# ---------- 差异化（ADR-036）：火球命中爆炸打到旁边的怪；带瘟疫的怪死掉传给身边的 ----------
+	if not _did_diff and now >= PHASE_ARC_AT - 20:
+		_did_diff = true
+		_rebuild_grid(&"fireball", &"")
+		var pl := _world.player
+		var es: Array = []
+		for n in root.get_tree().get_nodes_in_group(&"enemy"):
+			var e := n as Enemy
+			if e != null and e.stats != null and e.stats.is_alive():
+				es.append(e)
+		if es.size() >= 3:
+			var a := es[0] as Enemy
+			_diff_b = es[1]
+			a.global_position = pl.global_position + Vector2(40.0, 0.0)          # 火球直接命中它
+			_diff_b.global_position = pl.global_position + Vector2(40.0, 30.0)  # 在爆炸半径 45 内、不在弹道上
+			for e in es:
+				(e as Enemy).stats.buffs.clear()
+				if e != a and e != _diff_b:
+					(e as Enemy).global_position = pl.global_position + Vector2(-160.0, 160.0)
+			a.stats.life = a.stats.max_life()
+			_diff_b.stats.life = _diff_b.stats.max_life()
+			_explode_before = int(_world.behaviour_counts.get("explode_hits", 0))
+			_world._on_cast_requested(pl.global_position, Vector2.RIGHT)
+			_diff_at = now
+			_diff_stage = 1
+
+	if _diff_stage == 1 and now >= _diff_at + 12 and is_instance_valid(_diff_b):
+		_diff_stage = 2
+		_check("★ 火球命中爆炸：弹道外 30 像素的怪也掉血了（explode_hits +1）★",
+				int(_world.behaviour_counts.get("explode_hits", 0)) > _explode_before
+				and _diff_b.stats.life < _diff_b.stats.max_life(),
+				"explode_hits %d → %d，B 生命 %.0f" % [_explode_before, int(_world.behaviour_counts.get("explode_hits", 0)), _diff_b.stats.life])
+		# 瘟疫扩散：给 B 挂上瘟疫，把 A 移到它旁边、杀掉 B → A 该染上
+		var pl := _world.player
+		var a: Enemy = null
+		for n in root.get_tree().get_nodes_in_group(&"enemy"):
+			var e := n as Enemy
+			if e != null and e != _diff_b and e.stats != null and e.stats.is_alive():
+				a = e
+				break
+		if a != null:
+			a.global_position = _diff_b.global_position + Vector2(30.0, 0.0)
+			a.stats.buffs.clear()
+			_diff_b.stats.apply_buff(Demo.buff_contagion(), pl.stats)
+			_check("B 身上有瘟疫、A 没有", _diff_b.stats.buffs.has(&"contagion") and not a.stats.buffs.has(&"contagion"))
+			_diff_b.stats.take_damage(9.0e9)
+			_diff_b = a   # 下一步看 A
+	if _diff_stage == 2 and now >= _diff_at + 16 and is_instance_valid(_diff_b):
+		_diff_stage = 3
+		_check("★ 带瘟疫的怪死掉 → 身边的怪染上瘟疫 ★", _diff_b.stats.buffs.has(&"contagion")
+				and int(_world.behaviour_counts.get("contagion_spread", 0)) >= 1,
+				"spread %d" % int(_world.behaviour_counts.get("contagion_spread", 0)))
+
+	# ---------- 电弧连锁（ADR-035）：两只怪排成一列，一发电弧要连锁到第二只 ----------
+	if not _did_arc and now >= PHASE_ARC_AT:
+		_did_arc = true
+		_rebuild_grid(&"arc", &"")
+		var pl := _world.player
+		var es: Array = []
+		for n in root.get_tree().get_nodes_in_group(&"enemy"):
+			var e := n as Enemy
+			if e != null and e.stats != null and e.stats.is_alive():
+				es.append(e)
+		if es.size() >= 2:
+			_arc_a = es[0]
+			_arc_b = es[1]
+			_arc_a.global_position = pl.global_position + Vector2(40.0, 0.0)
+			_arc_b.global_position = pl.global_position + Vector2(100.0, 0.0)
+			for e in es:
+				(e as Enemy).stats.buffs.clear()
+				# ★ 其它怪全赶到远处 ★ —— 它们正围着玩家贴身站，电弧一出生就先撞上它们、
+				#   连锁也跳向它们，A / B 反而一根毛没掉（真的发生过）
+				if e != _arc_a and e != _arc_b:
+					(e as Enemy).global_position = pl.global_position + Vector2(-160.0, -160.0)
+			_arc_a.stats.life = _arc_a.stats.max_life()
+			_arc_b.stats.life = _arc_b.stats.max_life()
+			_arc_link_before = int(_world.behaviour_counts.get("link", 0))
+			_world._on_cast_requested(pl.global_position, Vector2.RIGHT)
+			print("[电弧] 投射物参数: %s" % _spec_text())
+
+	if _did_arc and now >= PHASE_ARC_AT + 20 and now < PHASE_ARC_AT + 21 and is_instance_valid(_arc_a) and is_instance_valid(_arc_b):
+		_check("★ 电弧命中第一只后连锁到了第二只（behaviour link +1）★",
+				int(_world.behaviour_counts.get("link", 0)) > _arc_link_before,
+				"link %d → %d" % [_arc_link_before, int(_world.behaviour_counts.get("link", 0))])
+		_check("两只都掉血了", _arc_a.stats.life < _arc_a.stats.max_life() and _arc_b.stats.life < _arc_b.stats.max_life(),
+				"A %.0f / B %.0f" % [_arc_a.stats.life, _arc_b.stats.life])
+		_check("电弧的投射物没有弹射次数", ProjectileSpec.build(_world.player.stats, _world.player.skill).chain_count == 0)
+
+	# ---------- 第七段：范围技能不走投射物（ADR-030）----------
+	# 新星：把一只怪挪到身边 60 像素处（圈半径 90），放一次 → 它得立刻挨打 + 冰缓，
+	# 而且场上不该多出任何投射物。风暴呼唤：指着它放，1.2 秒内不掉血，到点才劈。
+	if not _did_area and now >= PHASE_F_AT:
+		_did_area = true
+		_rebuild_grid(&"ice_nova", &"")
+		_area_target = _nearest_enemy()
+		if _area_target != null:
+			_area_target.global_position = _world.player.global_position + Vector2(60.0, 0.0)
+			_area_target.stats.buffs.remove(&"chill")
+			_area_target.stats.life = _area_target.stats.max_life()
+			_area_hits_before = int(_world.behaviour_counts.get("area_hits", 0))
+			var projectiles_before := _count_projectiles()
+			_world._on_cast_requested(_world.player.global_position, Vector2.RIGHT)
+			_check("★ 新星是范围技能：场上没有多出投射物 ★", _count_projectiles() == projectiles_before,
+					"放之前 %d 发，放之后 %d 发" % [projectiles_before, _count_projectiles()])
+		print("[第七段] 冰霜新星    参数: %s" % _world.player.area_spec().describe())
+
+	if _did_area and not _nova_checked and now >= PHASE_F_AT + 3 and is_instance_valid(_area_target):
+		_nova_checked = true
+		_check("★ 新星瞬发：圈里的怪立刻掉血 ★", _area_target.stats.life < _area_target.stats.max_life(),
+				"生命 %.0f / %.0f" % [_area_target.stats.life, _area_target.stats.max_life()])
+		_check("新星命中附加了冰缓", _area_target.stats.buffs.has(&"chill"))
+		_check("范围命中计入了 behaviour_counts.area_hits",
+				int(_world.behaviour_counts.get("area_hits", 0)) > _area_hits_before)
+		_check("范围施法计入了 behaviour_counts.area", int(_world.behaviour_counts.get("area", 0)) >= 1)
+		_check("场上出现了 AreaBurst 特效节点", _count_bursts() >= 1)
+		# --- 风暴呼唤：指着这只怪放，延迟 1.2 秒 ---
+		_did_storm = true
+		_rebuild_grid(&"storm_call", &"")
+		_area_target.stats.life = _area_target.stats.max_life()
+		_storm_life_before = _area_target.stats.life
+		_storm_hits_before = int(_world.behaviour_counts.get("area_hits", 0))
+		var from := _world.player.global_position
+		_world._on_cast_requested(from, (_area_target.global_position - from).normalized(),
+				_area_target.global_position)
+		print("[第七段] 风暴呼唤    参数: %s" % _world.player.area_spec().describe())
+
+	if _did_storm and not _storm_early_checked and now >= PHASE_F_AT + 3 + 20 and is_instance_valid(_area_target):
+		_storm_early_checked = true
+		_check("★ 风暴呼唤有延迟：0.3 秒时圈里的怪还没掉血 ★",
+				is_equal_approx(_area_target.stats.life, _storm_life_before)
+				and int(_world.behaviour_counts.get("area_hits", 0)) == _storm_hits_before,
+				"生命 %.0f（放之前 %.0f）" % [_area_target.stats.life, _storm_life_before])
+		_check("预警圈在场上（AreaBurst 还活着）", _count_bursts() >= 1)
+
+	if _did_storm and not _storm_checked and now >= PHASE_F_AT + 3 + STORM_DELAY_FRAMES + 12 and is_instance_valid(_area_target):
+		_storm_checked = true
+		_check("★ 1.2 秒后雷劈下来：圈里的怪掉血了 ★", _area_target.stats.life < _storm_life_before,
+				"生命 %.0f（放之前 %.0f）" % [_area_target.stats.life, _storm_life_before])
+		_check("落雷计入 area_hits", int(_world.behaviour_counts.get("area_hits", 0)) > _storm_hits_before)
+		_check("落雷附加感电", _area_target.stats.buffs.has(&"shock"))
+		# --- 烈焰风暴：一个圈炸 6 次（ADR-031 的脉冲）---
+		_did_firestorm = true
+		_rebuild_grid(&"firestorm", &"")
+		_firestorm_area_before = int(_world.behaviour_counts.get("area", 0))
+		_firestorm_at = now
+		var from := _world.player.global_position
+		_world._on_cast_requested(from, (_area_target.global_position - from).normalized(),
+				_area_target.global_position)
+		print("[第七段] 烈焰风暴    参数: %s" % _world.player.area_spec().describe())
+
+	if _did_firestorm and not _firestorm_checked and now >= _firestorm_at + FIRESTORM_FRAMES:
+		_firestorm_checked = true
+		var pulses := int(_world.behaviour_counts.get("area", 0)) - _firestorm_area_before
+		_check("★ 烈焰风暴一个圈炸了 6 次 ★（每次都是一轮完整结算）", pulses == 6, "实际 %d 次" % pulses)
+		# --- 近战：铁剑 + 横扫。面前的怪挨打，背后的不挨；出手间隔走攻速 ---
+		_rebuild_melee_grid(&"cleave")
+		var pl := _world.player
+		var enemies: Array = []
+		for n in root.get_tree().get_nodes_in_group(&"enemy"):
+			var e := n as Enemy
+			if e != null and e.stats != null and e.stats.is_alive():
+				enemies.append(e)
+		if enemies.size() >= 2:
+			# ① 真实按键链路先走：_try_cast 的冷却要按**攻击速度**算（铁剑 +10%、击杀的狂怒 +20%），
+			#    要是错走了施法速度（此刻是 1.0）就会红。★ 先做这个 ★ —— headless 下鼠标在 (0,0)，
+			#    _try_cast 会朝左挥一下，放在摆怪之后会误伤"背后的怪"
+			pl.can_aim = true
+			pl.stats.mana = pl.stats.max_mana()
+			pl._cast_cd = 0.0
+			# ★ 先读攻速再挥 ★ —— 这一挥可能击杀 → 狂怒（攻速 +20%）立刻上身，挥完再读就对不上了（真的抖过）
+			var cleave_tags := pl.skill.hit_tags()
+			var aps := pl.stats.get_stat(S.ATTACK_SPEED, cleave_tags)
+			var cps := pl.stats.get_stat(S.CAST_SPEED, cleave_tags)
+			pl._try_cast()
+			_check("攻速和施速此刻不同（否则下面这条是恒真）", not is_equal_approx(aps, cps),
+					"攻速 %.2f / 施速 %.2f" % [aps, cps])
+			_check("★ 攻击技能的出手间隔走攻击速度 ★（0.8 ÷ %.2f）" % aps,
+					is_equal_approx(pl._cast_cd, 0.80 / aps), "实际 %.3f 秒" % pl._cast_cd)
+			# ② 摆怪：一只面前、一只背后，朝右挥一下
+			_melee_front = enemies[0]
+			_melee_back = enemies[1]
+			_melee_front.global_position = pl.global_position + Vector2(40.0, 0.0)    # 面前（朝右挥）
+			_melee_back.global_position = pl.global_position + Vector2(-70.0, 0.0)    # 背后
+			# ★ 先把身上的点燃 / 中毒清掉 ★ —— 刚才的烈焰风暴大概率把它们点着了，
+			#   DoT 会在"背后的怪没挨到"这条断言上冒出几十点掉血，误判成挥砍打到了它
+			_melee_front.stats.buffs.clear()
+			_melee_back.stats.buffs.clear()
+			_melee_front.stats.life = _melee_front.stats.max_life()
+			_melee_back.stats.life = _melee_back.stats.max_life()
+			var projectiles_before := _count_projectiles()
+			_world._on_cast_requested(pl.global_position, Vector2.RIGHT, pl.global_position + Vector2(100, 0))
+			_check("★ 近战不产生投射物 ★", _count_projectiles() == projectiles_before)
+			print("[第七段] 横扫（铁剑）    参数: %s" % pl.area_spec().describe())
+		_melee_at = now
+
+	if _melee_at > 0 and not _melee_checked and now >= _melee_at + 4:
+		_melee_checked = true
+		if is_instance_valid(_melee_front) and is_instance_valid(_melee_back):
+			_check("★ 面前的怪挨了横扫 ★", _melee_front.stats.life < _melee_front.stats.max_life(),
+					"生命 %.0f / %.0f" % [_melee_front.stats.life, _melee_front.stats.max_life()])
+			_check("★ 背后的怪没挨到 ★", is_equal_approx(_melee_back.stats.life, _melee_back.stats.max_life()),
+					"生命 %.0f / %.0f" % [_melee_back.stats.life, _melee_back.stats.max_life()])
+		# --- 旋风斩：圈要跟着玩家走（用户反馈：以前钉在施放点上）---
+		_rebuild_melee_grid(&"cyclone")
+		var pl := _world.player
+		_world._on_cast_requested(pl.global_position, Vector2.RIGHT, pl.global_position + Vector2(100, 0))
+		for c in _world.fx.get_children():
+			if c is AreaBurst and not c.is_queued_for_deletion():
+				_cyclone_burst = c
+		_check("旋风斩放出了一个圈", _cyclone_burst != null)
+		# 把玩家挪走 60 像素（等价于按住方向键跑了一段），圈下一帧就该跟过来
+		pl.global_position += Vector2(60.0, 0.0)
+		_cyclone_at = now
+
+	if _cyclone_at > 0 and not _cyclone_checked and now >= _cyclone_at + 3:
+		_cyclone_checked = true
+		var pl := _world.player
+		if is_instance_valid(_cyclone_burst):
+			_check("★ 旋风斩的圈跟着玩家走 ★（挪了 60 像素，圈就在脚下）",
+					_cyclone_burst.global_position.distance_to(pl.global_position) < 2.0,
+					"圈在 %s，人在 %s" % [_cyclone_burst.global_position, pl.global_position])
+		else:
+			_check("旋风斩的圈 3 帧后还该活着（冲击波 0.28 秒）", false)
+		# --- 引导（ADR-033）：按住 = 一直转、一直扣蓝；引导中 Q 无效；松手就停 ---
+		# 网格里再放一根镶着电球术的法杖，Q 才有得切（切成功 = 引导没封住 Q）
+		var wand := EquipLibrary.apprentice_wand()
+		wand.socketed = GemLibrary.gem_spark()
+		pl.grid.place_anywhere(wand)
+		for i in pl.grid.skill_items().size():
+			if (pl.grid.skill_items()[i] as GemGrid.Placed).gem.id == &"iron_sword":
+				pl.set_skill(i)
+		_channel_index = pl.skill_index
+		_check("当前是旋风斩（铁剑里的）", pl.skill != null and pl.skill.id == &"cyclone")
+		_world.set_process(false)    # headless 鼠标在 (0,0)，别让 World 每帧把 can_aim 判成 false
+		pl.can_aim = true
+		pl.stats.mana = pl.stats.max_mana()
+		_channel_mana = pl.stats.mana
+		pl._cast_cd = 0.0
+		Input.action_press(&"cast")
+		_channel_at = now
+		_channel_stage = 1
+
+	if _channel_stage == 1 and now >= _channel_at + 3:
+		_channel_stage = 2
+		var pl := _world.player
+		_check("★ 按住 3 帧：正在引导、蓝已经扣了 ★", pl.is_channeling() and pl.stats.mana < _channel_mana,
+				"channeling=%s mana %.0f → %.0f" % [str(pl.is_channeling()), _channel_mana, pl.stats.mana])
+		_channel_mana = pl.stats.mana
+		var ev := InputEventAction.new()
+		ev.action = &"switch_skill"
+		ev.pressed = true
+		Input.parse_input_event(ev)
+	if _channel_stage == 2 and now >= _channel_at + 6:
+		_channel_stage = 3
+		var pl := _world.player
+		_check("★ 引导中按 Q：技能没切走 ★", pl.skill_index == _channel_index and pl.skill.id == &"cyclone",
+				"index %d → %d" % [_channel_index, pl.skill_index])
+		_check("还在引导", pl.is_channeling())
+	if _channel_stage == 3 and now >= _channel_at + 3 + 16:
+		_channel_stage = 4
+		var pl := _world.player
+		_check("★ 按住 0.25 秒以上：又扣了一段蓝（持续消耗）★", pl.stats.mana < _channel_mana,
+				"mana %.0f → %.0f" % [_channel_mana, pl.stats.mana])
+		Input.action_release(&"cast")
+	if _channel_stage == 4 and now >= _channel_at + 3 + 16 + 3:
+		_channel_stage = 5
+		var pl := _world.player
+		_check("★ 松手：引导结束 ★", not pl.is_channeling())
+		var ev := InputEventAction.new()
+		ev.action = &"switch_skill"
+		ev.pressed = true
+		Input.parse_input_event(ev)
+	if _channel_stage == 5 and now >= _channel_at + 3 + 16 + 6:
+		_channel_stage = 6
+		var pl := _world.player
+		_check("松手之后 Q 又能切了", pl.skill_index != _channel_index, "index %d" % pl.skill_index)
+		# 蓝不够 → 引导放不出来 → 不算引导中
+		for i in pl.grid.skill_items().size():
+			if (pl.grid.skill_items()[i] as GemGrid.Placed).gem.id == &"iron_sword":
+				pl.set_skill(i)
+		pl.stats.mana = 0.0
+		pl._cast_cd = 0.0
+		Input.action_press(&"cast")
+	if _channel_stage == 6 and now >= _channel_at + 3 + 16 + 9:
+		_channel_stage = 7
+		var pl := _world.player
+		_check("★ 没蓝：按住也引导不起来 ★", not pl.is_channeling())
+		Input.action_release(&"cast")
+		_world.set_process(true)
 
 	if now >= CHECK_AT:
 		_report()
@@ -516,7 +850,7 @@ func _check_inventory_ui() -> void:
 	p.grid.place(tcat, Vector2i(2, 2), 0)              # 箭头 → 指进法杖
 	p.set_skill(0)                                     # rebuild → 触媒缓存重扫
 	var fired: Array = []
-	var on_fire := func(_sk: SkillSpec, _ps: ProjectileSpec, cat_name: String) -> void:
+	var on_fire := func(_sk: SkillSpec, _ps: ProjectileSpec, _as: AreaSpec, cat_name: String) -> void:
 		fired.append(cat_name)
 	p.catalyst_triggered.connect(on_fire)
 	p.stats.mana = p.stats.max_mana()
@@ -609,9 +943,11 @@ func _check_inventory_ui() -> void:
 	console.set_filter("catalyst")
 	_check("筛选「触媒」= 6 颗", console.filtered_things().size() == 6)
 	console.set_filter("support")
-	_check("筛选「辅助宝石」= 15 颗（不含触媒）", console.filtered_things().size() == 15)
+	_check("筛选「辅助宝石」= 21 颗（不含触媒、不含崇高/血脉）", console.filtered_things().size() == 21)
+	console.set_filter("rare")
+	_check("筛选「崇高/血脉」= 7 颗", console.filtered_things().size() == 7)
 	console.set_filter("skill")
-	_check("筛选「技能宝石」= 5 颗", console.filtered_things().size() == 5)
+	_check("筛选「技能宝石」= 31 颗", console.filtered_things().size() == 31)
 	console.set_filter("all")
 	_check("筛选「全部」= 图鉴全量",
 			console.filtered_things().size() == GemSave.everything().size())
@@ -707,7 +1043,22 @@ func _check_save_roundtrip() -> void:
 	for thing in GemSave.everything():
 		if not p.grid.has_gem(thing.id):
 			missing.append(String(thing.id))
-	_check("图鉴里的宝石和装备一件不少", missing.is_empty(), "缺：" + ", ".join(missing))
+	# ★ 图鉴（48 件 = 59 格）已经比背包（56 格）大了（ADR-030）★ —— 补不全是数学上注定的，
+	#   规则改成"补到真的塞不下为止"：要么一件不少，要么连一颗 1×1 都放不进去了。
+	#   探针放在副本上，别把玩家的网格弄脏。
+	var probe := GemGrid.new()
+	probe.from_data(p.grid.to_data(), GemSave.resolve)
+	var truly_full := probe.place_anywhere(GemLibrary.gem_spark()) == null
+	_check("图鉴里的宝石和装备补到背包真的塞满为止（缺的都是塞不下的）",
+			missing.is_empty() or truly_full,
+			"缺：%s（1×1 还放得下：%s）" % [", ".join(missing), str(not truly_full)])
+	# 大件先放 → 缺的只能是 1×1 的宝石，不该有装备被挤出去
+	var missing_big := PackedStringArray()
+	for id in missing:
+		var thing = GemSave.resolve(StringName(id))
+		if thing is EquipItem and ((thing as EquipItem).width * (thing as EquipItem).height) > 1:
+			missing_big.append(id)
+	_check("缺的全是 1×1 宝石（大件先放，装备一件不少）", missing_big.is_empty(), "缺的大件：" + ", ".join(missing_big))
 	_check("★ 补齐时不会再塞一颗重复的电球术 ★（has_gem 认得槽里的）",
 			_count_id(p.grid, &"spark") == 1, "实际 %d 颗" % _count_id(p.grid, &"spark"))
 
@@ -735,6 +1086,18 @@ func _check_save_roundtrip() -> void:
 ##
 ## ★ 这就是新背包的用法（ADR-020）★ 技能宝石必须镶进法杖；箭头指着法杖生效。
 ## 用见习法杖（没有词缀）——测的是行为链路，别让法杖词缀掺进数值。
+## 近战版：铁剑里镶一颗攻击技能（走真实的镶嵌规则，不是直接塞 socketed）
+func _rebuild_melee_grid(skill_id: StringName) -> void:
+	var p: Player = _world.player
+	p.grid = GemGrid.new()
+	var sword := EquipLibrary.iron_sword()
+	var sp := p.grid.place(sword, Vector2i(3, 2), 0)
+	var gem: SkillGem = GemLibrary.make_gem(skill_id)
+	_check("铁剑收下「%s」（镶嵌规则放行）" % gem.display_name, p.grid.socket_reject_reason(gem, Vector2i(3, 2)) == "")
+	p.grid.socket(gem, sp)
+	p.set_skill(0)
+
+
 func _rebuild_grid(skill_id: StringName, sup_id: StringName) -> void:
 	var p: Player = _world.player
 	p.grid = GemGrid.new()
@@ -761,6 +1124,15 @@ func _send_mouse_to(viewport_pos: Vector2) -> void:
 
 
 ## 场上现在有几发投射物
+## 场上活着的范围特效节点（新星冲击波 / 风暴呼唤预警圈）
+func _count_bursts() -> int:
+	var n := 0
+	for c in _world.fx.get_children():
+		if c is AreaBurst and not c.is_queued_for_deletion():
+			n += 1
+	return n
+
+
 func _count_projectiles() -> int:
 	var n := 0
 	for c in _world.entities.get_children():
@@ -876,7 +1248,9 @@ func _run_process() -> bool:
 				_check("★ 开局在第 1 层 ★（一局共 %d 层）" % RunMap.FLOORS,
 						RunSession.state.floor_index == 0)
 				_check("用的是测试指定的种子", RunSession.state.seed_value == RUN_SEED)
-				_expected_enemies = RunContent.enemies_for_step(0)
+				# 第 1 层第 1 步：总数 == 同时在场上限，一波全放（波次逻辑在第九段专测）
+				_expected_enemies = mini(RunContent.enemies_for_step(0, 0),
+						RunContent.max_alive_for_step(0, 0))
 				# 第 1 步全是战斗房（商店最早出现在第 3 步），选第 0 个
 				_run_world._on_room_chosen(0)
 		1:
@@ -943,9 +1317,189 @@ func _run_process() -> bool:
 						and RunSession.state.gold == 0,
 						"floor=%d step=%d gold=%d" % [RunSession.state.floor_index,
 							RunSession.state.step, RunSession.state.gold])
+				_start_boss_phase(now)
+				_run_stage = 10
+		# ---------- 第十段：守关 Boss 必掉血脉辅助（ADR-031）----------
+		10:
+			if now >= _boss_base + 6:
+				_run_stage = 11
+				var alive := _run_world.alive_enemies()
+				_check("Boss 房：Boss + %d 只护卫一次到场" % RunContent.boss_escorts(0),
+						alive == 1 + RunContent.boss_escorts(0), "场上 %d 只" % alive)
+				_check("进 Boss 房前背包里没有血脉辅助", _lineage_owned() == 0)
+				for n in root.get_tree().get_nodes_in_group(&"enemy"):
+					(n as Enemy).stats.take_damage(9.0e9)
+		11:
+			if now >= _boss_base + 6 + 10:
+				_run_stage = 4
+				_check("守关 Boss 打赢 → 奖励面板", _run_world.run_ui.is_open()
+						and RunSession.state.phase == RunState.Phase.REWARD)
+				_check("★ Boss 必掉一颗血脉辅助，已进背包 ★", _lineage_owned() == 1, "背包里 %d 颗" % _lineage_owned())
+				var st := RunSession.state
+				var want := RunContent.boss_lineage([], st.rng_for("lineage"))
+				_check("掉的正是种子定的那颗（读档重打刷不了）",
+						want != null and _run_world.player.grid.has_gem(want.id))
+				# 放弃三选一 → 领完奖走人 → 下一层
+				_run_world._on_reward_skipped()
+				_check("★ 守关 Boss 打完进第 2 层 ★", st.floor_index == 1 and st.step == 0,
+						"floor=%d step=%d" % [st.floor_index, st.step])
+				_start_wave_phase(now)
+		# ---------- 第九段：波次刷怪 + 精英怪（ADR-028）----------
+		4:
+			# 第一波刚放出来：场上 = 同时在场上限，其余在队列里排队
+			if now >= _wave_base + 4:
+				_run_stage = 5
+				var alive := _run_world.alive_enemies()
+				_check("★ 深层房间第一波只放到上限，不是一口气全放 ★（16 只里先上 %d 只）" % _wave_cap,
+						alive == _wave_cap and _wave_cap < _wave_total,
+						"场上 %d / 上限 %d / 总数 %d" % [alive, _wave_cap, _wave_total])
+				_check("剩下的在队列里等", _run_world.room_enemies_left == _wave_total)
+				_check("第一波全是普通怪（精英压轴，还没上场）", _count_elites() == 0,
+						"精英 %d 只" % _count_elites())
+				_wave_first_ids = _enemy_ids()
+				# 全杀 → 增援该顶上来（reinforce_delay 已设为 0，一帧补一只）
+				for n in root.get_tree().get_nodes_in_group(&"enemy"):
+					(n as Enemy).stats.take_damage(9.0e9)
+		5:
+			# 等增援补满：第一波 8 只死光后，队列里的 8 只要一只只顶上来
+			if now >= _wave_base + 4 + 16:
+				_run_stage = 6
+				var alive := _run_world.alive_enemies()
+				_check("★ 死一只补一只：增援把场上重新补到上限 ★", alive == _wave_cap,
+						"场上 %d / 上限 %d" % [alive, _wave_cap])
+				_check("队列放空了（16 只全上过场）", _run_world.room_enemies_left == _wave_total - _wave_cap)
+				var reused := false
+				for id in _enemy_ids():
+					if _wave_first_ids.has(id):
+						reused = true
+				_check("增援是新刷出来的怪，不是第一波的尸体", not reused)
+				_check("房间没被误判为清空（还有一半怪没死）", not _run_world.run_ui.is_open()
+						and RunSession.state.phase == RunState.Phase.ROOM)
+				# 精英压轴：第二波里应该出现 elites_for_step 只精英，且长得像精英
+				var elites := _count_elites()
+				_check("★ 第二波里有 %d 只精英 ★" % _wave_elites, elites == _wave_elites,
+						"实际 %d 只" % elites)
+				var e := _first_elite()
+				if e != null:
+					_check("精英头顶挂了词条名标签", e._title != null and e._title.text != ""
+							and e._title.text == e.stats.affix_title(),
+							"标签 " + (e._title.text if e._title != null else "<无>"))
+					_check("精英体型比普通怪大", e.scale.x > 1.0, "scale %.2f" % e.scale.x)
+					_check("精英是金色调（没在闪白时）", e.sprite.modulate.is_equal_approx(Enemy.ELITE_TINT)
+							or e._base_tint.is_equal_approx(Enemy.ELITE_TINT))
+					_check("精英名字带词条", e.stats.display_name.begins_with(e.stats.affix_title()))
+					_check("第 4 层精英挂 2 条词条", e.stats.affixes.size() == 2)
+					print("精英样本：%s（生命 %.0f）" % [e.stats.display_name, e.stats.max_life()])
+				for n in root.get_tree().get_nodes_in_group(&"enemy"):
+					(n as Enemy).stats.take_damage(9.0e9)
+		6:
+			if now >= _wave_base + 4 + 16 + 10:
+				_run_stage = 7
+				_check("★ 16 只全清才算清房：弹出奖励面板 ★", _run_world.run_ui.is_open()
+						and RunSession.state.phase == RunState.Phase.REWARD
+						and _run_world.room_enemies_left == 0,
+						"phase=%d left=%d" % [RunSession.state.phase, _run_world.room_enemies_left])
+				# ---- 爪类词条：精英近战给玩家挂 DoT，DoT 能把玩家烧死并正确触发死亡 ----
+				# 以前没有怪能给玩家上 DoT，"被 DoT 打死" 这条路从没走过（血归零不发 died）
+				var pl := _run_world.player
+				pl.stats.life = 5.0
+				_saw_debuff = false
+				pl.debuffed.connect(func(_n: String) -> void: _saw_debuff = true)
+				pl.receive_buff(Demo.buff_scorching_claw(), RunContent.make_elite_from(Demo.make_monster(), 0, _run_world._rng))
+				_check("挂上减益时发了 debuffed 信号（World 靠它飘字）", _saw_debuff)
+				_check("玩家身上有【灼热】", pl.stats.buffs.has(&"scorching_claw"))
+		7:
+			# 灼热每 0.5 秒一跳 = 30 物理帧；5 点血一跳必死
+			if now >= _wave_base + 4 + 16 + 10 + 40:
+				var pl := _run_world.player
+				_check("★ DoT 把玩家烧死了，而且 World 收到了 died（死亡大字亮了）★",
+						not pl.stats.is_alive() and _run_world.hud._center_msg.visible,
+						"life=%.1f msg=%s" % [pl.stats.life, str(_run_world.hud._center_msg.visible)])
+				_check("阵亡 = 整局结束（局存档被删）", not FileAccess.file_exists(RunSession.path))
 				_finish_all()
 				return true
 	return false
+
+
+# ---- 第十段：Boss + 血脉 ----
+var _boss_base := 0
+
+
+## 把这一局拨到第 1 层最后一步（守关 Boss 房），像玩家一样点进去
+func _start_boss_phase(now: int) -> void:
+	print("\n[第十段] 守关 Boss 必掉血脉辅助")
+	var st := RunSession.state
+	st.step = RunMap.STEPS - 1
+	_check("最后一步是 Boss 房", (st.rooms()[0] as RunMap.Room).type == RunMap.RoomType.BOSS)
+	_run_world._on_room_chosen(0)
+	_boss_base = now
+
+
+## 背包里有几颗血脉辅助
+func _lineage_owned() -> int:
+	var n := 0
+	for g in GemLibrary.all_lineage():
+		if _run_world.player.grid.has_gem((g as SupportGem).id):
+			n += 1
+	return n
+
+
+# ---- 第九段：波次 + 精英 ----
+var _wave_base := 0
+var _wave_total := 0
+var _wave_cap := 0
+var _wave_elites := 0
+var _wave_first_ids: Array = []
+var _saw_debuff := false
+
+
+## 把这一局直接拨到第 4 层第 6 步（最深的普通房），开一间战斗房。
+## reinforce_delay 设 0：队列一帧放一只，不然 8 只增援要等 7 秒多。
+func _start_wave_phase(now: int) -> void:
+	print("\n[第九段] 波次刷怪 + 精英怪：第 4 层第 6 步的战斗房")
+	# ★ 走真实的选房链路 ★：先把局拨到第 4 层（会按层种子生成那层的图）、第 6 步，
+	#   再像玩家一样点进那一步的一个战斗房 —— _on_room_chosen 会收面板、配名单、放第一波
+	var st := RunSession.state
+	st._enter_floor(RunMap.FLOORS - 1)
+	st.step = RunMap.STEPS - 2
+	var idx := -1
+	for i in st.rooms().size():
+		if (st.rooms()[i] as RunMap.Room).type == RunMap.RoomType.COMBAT:
+			idx = i
+			break
+	_check("第 4 层第 6 步有战斗房可选", idx >= 0)
+	_wave_total = RunContent.enemies_for_step(st.step, st.floor_index)
+	_wave_cap = RunContent.max_alive_for_step(st.step, st.floor_index)
+	_wave_elites = RunContent.elites_for_step(st.step, st.floor_index)
+	_run_world.reinforce_delay = 0.0
+	_run_world._on_room_chosen(idx)
+	_wave_base = now
+
+
+func _count_elites() -> int:
+	var n := 0
+	for node in root.get_tree().get_nodes_in_group(&"enemy"):
+		var e := node as Enemy
+		if e != null and e.stats != null and e.stats.is_alive() and e.stats.is_elite():
+			n += 1
+	return n
+
+
+func _first_elite() -> Enemy:
+	for node in root.get_tree().get_nodes_in_group(&"enemy"):
+		var e := node as Enemy
+		if e != null and e.stats != null and e.stats.is_alive() and e.stats.is_elite():
+			return e
+	return null
+
+
+func _enemy_ids() -> Array:
+	var out: Array = []
+	for node in root.get_tree().get_nodes_in_group(&"enemy"):
+		var e := node as Enemy
+		if e != null and e.stats != null and e.stats.is_alive():
+			out.append(e.get_instance_id())
+	return out
 
 
 ## 领的奖励落没落地，按类型各查各的

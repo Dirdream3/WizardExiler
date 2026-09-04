@@ -1,4 +1,4 @@
-﻿class_name GemSave
+class_name GemSave
 extends RefCounted
 
 ## 背包存档：把网格摆法 + 宝石等级写进 `user://`，下次进游戏原样恢复。
@@ -120,11 +120,20 @@ static func everything() -> Array:
 
 
 ## 把图鉴里有、但网格里还没有的东西补进空地。
+## ★ 图鉴已经比背包大了（45 件 vs 56 格，ADR-029）★ 所以是"能塞多少塞多少"：
+##   放不下的静默跳过，不报错 —— 沙盒里想要哪件用控制台（F1）生成就行。
 static func fill_missing(grid: GemGrid) -> int:
 	var added := 0
+	# ★ 大件先放 ★ —— 图鉴顺序是"宝石在前、装备在后"，按那个顺序放，38 颗 1×1 宝石
+	#   先把网格撒成筛子，3×1 的腰带就再也找不到连着的三格了（真的发生过：缺 arcane_belt）。
+	#   先放大件、后填小件，是所有背包打包问题的通用做法。
+	var pending: Array = []
 	for thing in everything():
-		if grid.has_gem(thing.id):
-			continue
+		if not grid.has_gem(thing.id):
+			pending.append(thing)
+	pending.sort_custom(func(a, b) -> bool:
+		return GemGrid.shape_for(a).cells_at(0).size() > GemGrid.shape_for(b).cells_at(0).size())
+	for thing in pending:
 		if grid.place_anywhere(thing) != null:
 			added += 1
 	return added

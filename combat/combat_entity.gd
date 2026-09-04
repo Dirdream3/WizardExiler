@@ -32,6 +32,11 @@ var skill_mods := StatSet.new()
 ## 临时词缀：Buff / Debuff
 var buffs := BuffContainer.new()
 
+## ★ 精英词条 ★（MonsterAffix）。普通怪 / 玩家是空数组；精英怪上挂 1~2 条。
+## 词条的词缀已经进了 gear_mods（source = 词条 id），这里只是"这只怪有哪些词条"的清单：
+## 表现层靠它画头顶的名字、判断近战要不要附带异常。
+var affixes: Array = []
+
 var life: float = 0.0
 var mana: float = 0.0
 
@@ -81,6 +86,37 @@ func refill() -> CombatEntity:
 
 func is_alive() -> bool:
 	return life > 0.0
+
+
+## 是精英怪吗（身上挂了至少一条词条）
+func is_elite() -> bool:
+	return not affixes.is_empty()
+
+
+## 词条名连成一串（「迅捷·坚韧」）。没有词条返回空串
+func affix_title() -> String:
+	var names := PackedStringArray()
+	for a in affixes:
+		names.append((a as MonsterAffix).display_name)
+	return "·".join(names)
+
+
+## 所有词条的体型倍率连乘（「巨型」1.35 × 别的 1.0 = 1.35）
+func affix_scale() -> float:
+	var s := 1.0
+	for a in affixes:
+		s *= (a as MonsterAffix).body_scale
+	return s
+
+
+## 词条附带的近战异常（可能有多条：灼热之爪 + 霜爪）
+func affix_on_hit_buffs() -> Array:
+	var out: Array = []
+	for a in affixes:
+		var b := (a as MonsterAffix).on_hit_buff
+		if b != null:
+			out.append(b)
+	return out
 
 
 func take_damage(amount: float) -> void:
